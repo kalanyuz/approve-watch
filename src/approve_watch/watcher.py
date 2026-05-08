@@ -9,8 +9,8 @@ from pathlib import Path
 
 from approve_watch.config import (
     DECISION_POLL_S,
+    KIND_TIMEOUTS_S,
     POLL_INTERVAL_S,
-    WATCHER_TIMEOUT_S,
     Config,
     load_config,
 )
@@ -70,6 +70,7 @@ async def _handle_pane(
     detector: Detector,
     seen: _SignatureCache,
     db_path: Path | None,
+    timeouts: dict[str, float] | None = None,
 ) -> None:
     raw = await asyncio.to_thread(source.capture, pane)
     if not raw:
@@ -79,13 +80,16 @@ async def _handle_pane(
         return
 
     seen.add(m.signature)
-    log.info("pane %s prompt detected: %s", pane, m.command)
+    log.info("pane %s prompt detected (%s): %s", pane, m.kind, m.command)
 
     with connect(db_path) as conn:
-        row_id = insert_pending(conn, command=m.command, source=f"{source.name}:{pane}")
+        row_id = insert_pending(
+            conn, command=m.command, source=f"{source.name}:{pane}", kind=m.kind
+        )
 
+    timeout = (timeouts or KIND_TIMEOUTS_S).get(m.kind, KIND_TIMEOUTS_S[m.kind])
     approved, decided_by = await _await_decision(
-        db_path, row_id, deadline=time.monotonic() + WATCHER_TIMEOUT_S
+        db_path, row_id, deadline=time.monotonic() + timeout
     )
     log.info(
         "row %s decided: approved=%s by=%s -> sending keystroke",
@@ -113,6 +117,7 @@ async def watch_loop(
     db_path: Path | None = None,
     pane_filter: Iterable[PaneId] | None = None,
     stop: asyncio.Event | None = None,
+    timeouts: dict[str, float] | None = None,
 ) -> None:
     """Run forever (or until ``stop`` is set), polling each pane in parallel.
 
@@ -138,7 +143,7 @@ async def watch_loop(
             if task is not None and not task.done():
                 continue
             in_flight[pane] = asyncio.create_task(
-                _handle_pane(source, pane, detector, seen, db_path),
+                _handle_pane(source, pane, detector, seen, db_path, timeouts),
                 name=f"approve-watch:{pane}",
             )
 
@@ -167,6 +172,8 @@ async def watch_loop(
 def run(config: Config | None = None) -> None:
     cfg = config or load_config()
     source = make_source(cfg.source)
-    detector = Detector(cfg.prompt_regex)
-    log.info("watcher starting: source=%s", source.name)
-    asyncio.run(watch_loop(source, detector))
+    detector = Detector(cfg.shell_regex, cfg.other_regex)
+    log.info(
+        "watcher starting: source=%s, timeouts=%s", source.name, cfg.timeouts
+    )
+    asyncio.run(watch_loop(source, detector, timeouts=cfg.timeouts))

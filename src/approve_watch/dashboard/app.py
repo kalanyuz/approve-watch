@@ -80,11 +80,16 @@ class ApproveWatchApp(App[None]):
             rid = int(r["id"])
             if rid in self._known_pending:
                 continue
+            try:
+                kind = r["kind"]
+            except (IndexError, KeyError):
+                kind = "shell_command"
             card = ApprovalCard(
                 row_id=rid,
                 command=r["command"],
                 source=r["source"],
                 asked_at=r["asked_at"],
+                kind=kind or "shell_command",
             )
             self._queue.mount(card)
             self._known_pending.add(rid)

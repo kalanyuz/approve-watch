@@ -6,29 +6,48 @@ from pathlib import Path
 
 import pytest
 
-from approve_watch import config as cfg_mod
-from approve_watch.config import DEFAULT_PROMPT_REGEX
+from approve_watch.config import (
+    KIND_OTHER,
+    KIND_SHELL,
+    OTHER_PROMPT_REGEX,
+    SHELL_COMMAND_REGEX,
+)
 from approve_watch.db import claim_decision, connect, recent
 from approve_watch.detector import Detector
 from approve_watch.sources.base import PaneId
 from approve_watch.watcher import _SignatureCache, _handle_pane, watch_loop
 
 
-PROMPT_TEXT = (
+SHELL_PROMPT = (
     "Run this command?\n"
     "Not in allowlist: ls -la\n"
     "→ Run (once) (y)\n"
     "  Skip (esc or n)\n"
 )
+DELETE_PROMPT = (
+    "Delete this file?\n"
+    "/tmp/some/file.txt\n"
+    "→ Delete (y)\n"
+    "  Skip (esc or n)\n"
+)
 CLEARED_TEXT = "ls -la\nfile1 file2\n"
+
+# Per-test fast timeouts. Shell tier shrinks 3.2s -> 0.5s; "other" tier
+# shrinks 1h -> 1.0s so we can verify it's distinct without sleeping for an
+# hour.
+FAST_TIMEOUTS = {KIND_SHELL: 0.5, KIND_OTHER: 1.0}
+
+
+def make_detector() -> Detector:
+    return Detector(SHELL_COMMAND_REGEX, OTHER_PROMPT_REGEX)
 
 
 class FakeSource:
     name = "tmux"
 
-    def __init__(self, panes: list[PaneId]) -> None:
+    def __init__(self, panes: list[PaneId], prompt: str = SHELL_PROMPT) -> None:
         self._panes = panes
-        self._buffers: dict[PaneId, str] = {p: PROMPT_TEXT for p in panes}
+        self._buffers: dict[PaneId, str] = {p: prompt for p in panes}
         self.sent: list[tuple[PaneId, str]] = []
 
     def list_panes(self) -> list[PaneId]:
@@ -46,24 +65,11 @@ class FakeSource:
         self._buffers[pane] = CLEARED_TEXT
 
 
-@pytest.fixture
-def fast_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shrink the watcher's 3.2s timeout so tests complete quickly."""
-    monkeypatch.setattr(cfg_mod, "WATCHER_TIMEOUT_S", 0.5)
-    monkeypatch.setattr(cfg_mod, "DECISION_POLL_S", 0.02)
-    # Re-import the watcher's module-level constants we shadowed.
-    import approve_watch.watcher as w
-
-    monkeypatch.setattr(w, "WATCHER_TIMEOUT_S", 0.5)
-    monkeypatch.setattr(w, "DECISION_POLL_S", 0.02)
-
-
-async def test_auto_approves_after_timeout(tmp_db: Path, fast_timeouts: None) -> None:
+async def test_auto_approves_after_shell_timeout(tmp_db: Path) -> None:
     src = FakeSource(["s:0.0"])
-    detector = Detector(DEFAULT_PROMPT_REGEX)
     seen = _SignatureCache()
     t0 = time.monotonic()
-    await _handle_pane(src, "s:0.0", detector, seen, tmp_db)
+    await _handle_pane(src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS)
     elapsed = time.monotonic() - t0
     assert 0.4 <= elapsed <= 1.5
 
@@ -75,22 +81,37 @@ async def test_auto_approves_after_timeout(tmp_db: Path, fast_timeouts: None) ->
     assert rows[0]["decided_by"] == "auto-watcher"
     assert rows[0]["command"] == "ls -la"
     assert rows[0]["source"] == "tmux:s:0.0"
+    assert rows[0]["kind"] == KIND_SHELL
 
 
-async def test_user_approval_preempts(tmp_db: Path, fast_timeouts: None) -> None:
+async def test_other_tier_uses_longer_timeout(tmp_db: Path) -> None:
+    """A Delete-style prompt (other tier) waits longer than shell tier."""
+    src = FakeSource(["s:0.0"], prompt=DELETE_PROMPT)
+    seen = _SignatureCache()
+    t0 = time.monotonic()
+    await _handle_pane(src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS)
+    elapsed = time.monotonic() - t0
+    # 1.0s tier-2 vs 0.5s tier-1 — so we expect ~1.0s, never less than 0.9s.
+    assert 0.9 <= elapsed <= 2.0
+    with connect(tmp_db) as conn:
+        rows = recent(conn)
+    assert rows[0]["kind"] == KIND_OTHER
+    assert rows[0]["command"] == "/tmp/some/file.txt"
+    assert rows[0]["decided_by"] == "auto-watcher"
+
+
+async def test_user_approval_preempts(tmp_db: Path) -> None:
     src = FakeSource(["s:0.0"])
-    detector = Detector(DEFAULT_PROMPT_REGEX)
     seen = _SignatureCache()
 
     async def user_decides() -> None:
         await asyncio.sleep(0.1)
-        # The watcher inserted a row by now; find and decide it.
         with connect(tmp_db) as conn:
             rid = conn.execute("SELECT id FROM approvals").fetchone()[0]
             assert claim_decision(conn, rid, approved=1, decided_by="user")
 
     await asyncio.gather(
-        _handle_pane(src, "s:0.0", detector, seen, tmp_db),
+        _handle_pane(src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS),
         user_decides(),
     )
 
@@ -100,9 +121,8 @@ async def test_user_approval_preempts(tmp_db: Path, fast_timeouts: None) -> None
     assert rows[0]["decided_by"] == "user"
 
 
-async def test_user_reject_sends_n(tmp_db: Path, fast_timeouts: None) -> None:
+async def test_user_reject_sends_n(tmp_db: Path) -> None:
     src = FakeSource(["s:0.0"])
-    detector = Detector(DEFAULT_PROMPT_REGEX)
     seen = _SignatureCache()
 
     async def user_decides() -> None:
@@ -112,7 +132,7 @@ async def test_user_reject_sends_n(tmp_db: Path, fast_timeouts: None) -> None:
             assert claim_decision(conn, rid, approved=0, decided_by="user")
 
     await asyncio.gather(
-        _handle_pane(src, "s:0.0", detector, seen, tmp_db),
+        _handle_pane(src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS),
         user_decides(),
     )
 
@@ -123,22 +143,22 @@ async def test_user_reject_sends_n(tmp_db: Path, fast_timeouts: None) -> None:
     assert rows[0]["decided_by"] == "user"
 
 
-async def test_no_match_no_action(tmp_db: Path, fast_timeouts: None) -> None:
+async def test_no_match_no_action(tmp_db: Path) -> None:
     src = FakeSource(["s:0.0"])
     src._buffers["s:0.0"] = "boring output\n$ pwd\n/home/me\nNo prompt to approve here.\n"
-    detector = Detector(DEFAULT_PROMPT_REGEX)
     seen = _SignatureCache()
-    await _handle_pane(src, "s:0.0", detector, seen, tmp_db)
+    await _handle_pane(src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS)
     assert src.sent == []
     with connect(tmp_db) as conn:
         assert recent(conn) == []
 
 
-async def test_watch_loop_can_stop(tmp_db: Path, fast_timeouts: None) -> None:
+async def test_watch_loop_can_stop(tmp_db: Path) -> None:
     src = FakeSource([])
-    detector = Detector(DEFAULT_PROMPT_REGEX)
     stop = asyncio.Event()
-    task = asyncio.create_task(watch_loop(src, detector, tmp_db, stop=stop))
+    task = asyncio.create_task(
+        watch_loop(src, make_detector(), tmp_db, stop=stop, timeouts=FAST_TIMEOUTS)
+    )
     await asyncio.sleep(0.3)
     stop.set()
     await asyncio.wait_for(task, timeout=1.0)
