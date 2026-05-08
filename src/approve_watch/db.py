@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+from approve_watch.config import db_path
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS approvals (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  asked_at    TEXT    NOT NULL,
+  command     TEXT    NOT NULL,
+  source      TEXT    NOT NULL,
+  approved    INTEGER,
+  decided_at  TEXT,
+  decided_by  TEXT,
+  label       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_asked_at ON approvals(asked_at);
+CREATE INDEX IF NOT EXISTS idx_approvals_pending  ON approvals(approved) WHERE approved IS NULL;
+"""
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def init_db(path: Path | None = None) -> Path:
+    p = path or db_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(p) as conn:
+        conn.executescript(SCHEMA)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    return p
+
+
+@contextmanager
+def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    p = path or db_path()
+    conn = sqlite3.connect(p, isolation_level=None, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def insert_pending(conn: sqlite3.Connection, command: str, source: str) -> int:
+    cur = conn.execute(
+        "INSERT INTO approvals (asked_at, command, source) VALUES (?, ?, ?)",
+        (now_iso(), command, source),
+    )
+    rid = cur.lastrowid
+    assert rid is not None
+    return rid
+
+
+def fetch_decision(conn: sqlite3.Connection, row_id: int) -> tuple[int | None, str | None]:
+    row = conn.execute(
+        "SELECT approved, decided_by FROM approvals WHERE id=?", (row_id,)
+    ).fetchone()
+    if row is None:
+        return None, None
+    return row["approved"], row["decided_by"]
+
+
+def claim_decision(
+    conn: sqlite3.Connection, row_id: int, approved: int, decided_by: str
+) -> bool:
+    """Set the decision only if still pending. Returns True if this caller wrote it."""
+    cur = conn.execute(
+        "UPDATE approvals SET approved=?, decided_by=?, decided_at=? "
+        "WHERE id=? AND approved IS NULL",
+        (approved, decided_by, now_iso(), row_id),
+    )
+    return cur.rowcount == 1
+
+
+def list_pending(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM approvals WHERE approved IS NULL ORDER BY id ASC"
+    ).fetchall()
+
+
+def set_label(conn: sqlite3.Connection, row_id: int, label: str | None) -> None:
+    conn.execute("UPDATE approvals SET label=? WHERE id=?", (label, row_id))
+
+
+def hourly_counts_24h(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    rows = conn.execute(
+        """
+        SELECT strftime('%Y-%m-%d %H:00', asked_at) AS bucket, COUNT(*) AS n
+        FROM approvals
+        WHERE asked_at >= datetime('now', '-24 hours')
+        GROUP BY bucket
+        ORDER BY bucket
+        """
+    ).fetchall()
+    return [(r["bucket"], r["n"]) for r in rows]
+
+
+def daily_counts_30d(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    rows = conn.execute(
+        """
+        SELECT strftime('%Y-%m-%d', asked_at) AS bucket, COUNT(*) AS n
+        FROM approvals
+        WHERE asked_at >= datetime('now', '-30 days')
+        GROUP BY bucket
+        ORDER BY bucket
+        """
+    ).fetchall()
+    return [(r["bucket"], r["n"]) for r in rows]
+
+
+def total_today(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM approvals WHERE asked_at >= datetime('now', 'start of day')"
+    ).fetchone()
+    return int(row["n"])
+
+
+def pending_count(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT COUNT(*) AS n FROM approvals WHERE approved IS NULL").fetchone()
+    return int(row["n"])
+
+
+def recent(conn: sqlite3.Connection, limit: int = 200) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM approvals ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
