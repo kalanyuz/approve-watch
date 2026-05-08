@@ -24,18 +24,28 @@ SQLite, and (optionally) preempt the auto-approval from a Textual dashboard.
 
 ## Install
 
+Requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
+
 ```bash
 cd approve-watch
-python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev]'
+uv sync                        # creates .venv, installs runtime + dev deps
 ```
+
+`uv` will fetch CPython 3.14 automatically if it isn't already on the system.
 
 ## Use
 
 ```bash
-approve-watch init-db          # create ~/.local/share/approve-watch/history.db
-approve-watch watch &          # start the watcher in the background
-approve-watch dash             # open the dashboard (separate terminal)
+uv run approve-watch init-db   # create ~/.local/share/approve-watch/history.db
+uv run approve-watch watch &   # start the watcher in the background
+uv run approve-watch dash      # open the dashboard (separate terminal)
+```
+
+Or activate the venv once and drop the `uv run` prefix:
+
+```bash
+source .venv/bin/activate
+approve-watch dash
 ```
 
 The watcher auto-discovers panes:
