@@ -40,28 +40,34 @@ approve-watch dash             # open the dashboard (separate terminal)
 
 ## Calibration
 
-Both `cmux`'s CLI surface and `cursor-agent`'s exact prompt text vary by version.
-After install:
+The default regex was calibrated against this real cursor-agent prompt:
 
-1. Run `cursor-agent` in a tmux pane and trigger a command-approval prompt.
-2. From another shell:
+```
+Run this command?
+Not in allowlist: <command>  •  Not in team allowlist: <command>
+→ Run (once) (y)
+  Skip (esc or n)
+```
 
-   ```bash
-   tmux capture-pane -p -t <pane> -S -50 > /tmp/cap.txt
-   ```
+If a future cursor-agent version changes the wording, override the regex:
 
-3. Inspect `/tmp/cap.txt` and, if the watcher does not detect, override the regex:
+```bash
+mkdir -p ~/.config/approve-watch
+cat > ~/.config/approve-watch/config.toml <<'EOF'
+prompt_regex = '''(?ms)<your regex here, with named group "command">'''
+EOF
+```
 
-   ```bash
-   mkdir -p ~/.config/approve-watch
-   cat > ~/.config/approve-watch/config.toml <<'EOF'
-   prompt_regex = '''(?ms)<your regex here, with named group "command">'''
-   EOF
-   ```
+To capture the live prompt for inspection while iterating:
 
-4. If you run inside coder `cmux` rather than plain tmux, fill in
-   `src/approve_watch/sources/cmux.py` with the equivalent of `list-panes`,
-   `capture`, and `send-keys` for cmux. The rest of the system is unchanged.
+```bash
+tmux capture-pane -p -t <pane> -S -50 > /tmp/cap.txt
+```
+
+`coder/cmux`'s CLI surface varies by version, so the `cmux` source is a stub
+in `src/approve_watch/sources/cmux.py`. Fill in the equivalent of `list-panes`,
+`capture`, `send-enter`, and `send-reject` for cmux on your machine. The rest
+of the system is unchanged.
 
 ## Schema
 

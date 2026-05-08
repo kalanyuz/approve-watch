@@ -15,10 +15,10 @@ from approve_watch.watcher import _SignatureCache, _handle_pane, watch_loop
 
 
 PROMPT_TEXT = (
-    "Some output\n"
-    "Run this command in your shell?\n"
-    "$ ls -la\n"
-    "(y/N): "
+    "Run this command?\n"
+    "Not in allowlist: ls -la\n"
+    "→ Run (once) (y)\n"
+    "  Skip (esc or n)\n"
 )
 CLEARED_TEXT = "ls -la\nfile1 file2\n"
 
@@ -125,7 +125,7 @@ async def test_user_reject_sends_n(tmp_db: Path, fast_timeouts: None) -> None:
 
 async def test_no_match_no_action(tmp_db: Path, fast_timeouts: None) -> None:
     src = FakeSource(["s:0.0"])
-    src._buffers["s:0.0"] = "boring output\n$ pwd\n/home/me\n"
+    src._buffers["s:0.0"] = "boring output\n$ pwd\n/home/me\nNo prompt to approve here.\n"
     detector = Detector(DEFAULT_PROMPT_REGEX)
     seen = _SignatureCache()
     await _handle_pane(src, "s:0.0", detector, seen, tmp_db)

@@ -7,9 +7,11 @@ from pathlib import Path
 
 DEFAULT_PROMPT_REGEX = (
     r"(?ms)"
-    r"(?:Run|Execute|Allow)\s+(?:this\s+)?command[^\n]*\n"
-    r".*?[\$>]\s*(?P<command>[^\n]+)\n"
-    r".*?\((?:y/N|Y/n)\)"
+    r"Run this command\?"
+    r".*?Not\s+in\s+(?:team\s+)?allowlist:\s*"
+    r"(?P<command>[^\n•]+?)"
+    r"\s*(?:•|\n)"
+    r".*?Skip\s*\(esc or n\)"
 )
 
 WATCHER_TIMEOUT_S = 3.2
