@@ -20,16 +20,18 @@ SHELL_COMMAND_REGEX = (
 )
 
 # Tier 2: every other cursor-agent confirmation that uses the same hotkey
-# footer (Delete, Edit, Web Fetch, etc.). Captures the line directly above
-# the "→ <verb> ... (y)" choice as the action description, and tolerates any
-# number of intermediate option lines (e.g. "Always allow ... (tab)") between
-# that choice and the trailing "Skip (esc or n)" footer. The shell-command
+# footer (Delete, Edit, Web Fetch, Web Search, etc.). Captures the line
+# directly above the "→ <verb …> ... (y)" choice as the action description,
+# tolerates multi-word verbs (e.g. "Allow search"), zero or more
+# parenthesised modifier clauses (e.g. "(once)"), and any number of
+# intermediate option lines (e.g. "Always allow … (tab)") between that
+# choice and the trailing "Skip (esc or n)" footer. The shell-command
 # regex is tried first, so this only fires when that one didn't match.
 OTHER_PROMPT_REGEX = (
     r"(?ms)"
     r"(?P<command>[^\n]+?)"
     r"\s*\n\s*"
-    r"→\s*\S+(?:\s+\([^)]+\))?\s*\(y\)"
+    r"→\s*[^()\n]+?(?:\s*\([^)]+\))*\s*\(y\)"
     r".{0,500}?"
     r"Skip\s*\(esc or n\)"
 )

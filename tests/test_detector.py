@@ -63,6 +63,18 @@ PROMPT_WEB_FETCH_BOXED = (
     "    Skip (esc or n)\n"
     "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
 )
+# Real cursor-agent web-search prompt — verb is two words ("Allow search").
+PROMPT_WEB_SEARCH = (
+    "Allow this web search?\n"
+    "→ Allow search (y)\n"
+    "  Skip (esc or n)\n"
+)
+# Hypothetical multi-word verb with a parenthesised modifier clause.
+PROMPT_MULTI_WORD_VERB_WITH_MODIFIER = (
+    "Allow this thing?\n"
+    "→ Allow always (once) (y)\n"
+    "  Skip (esc or n)\n"
+)
 
 
 def test_strip_ansi() -> None:
@@ -133,6 +145,24 @@ def test_other_tier_matches_boxed_web_fetch_prompt() -> None:
     assert m is not None
     assert m.kind == KIND_OTHER
     assert m.command == "Allow this web fetch?"
+
+
+def test_other_tier_matches_multi_word_verb_web_search() -> None:
+    """Real cursor-agent web-search prompt: '→ Allow search (y)'.
+    The verb is two words, which the previous regex's '\\S+' single-token
+    verb couldn't accommodate."""
+    m = make_detector().match(PROMPT_WEB_SEARCH)
+    assert m is not None
+    assert m.kind == KIND_OTHER
+    assert m.command == "Allow this web search?"
+
+
+def test_other_tier_matches_multi_word_verb_plus_modifier() -> None:
+    """Multi-word verbs and parenthesised modifiers must coexist."""
+    m = make_detector().match(PROMPT_MULTI_WORD_VERB_WITH_MODIFIER)
+    assert m is not None
+    assert m.kind == KIND_OTHER
+    assert m.command == "Allow this thing?"
 
 
 def test_shell_takes_precedence_over_other() -> None:
