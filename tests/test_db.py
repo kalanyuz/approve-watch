@@ -4,10 +4,13 @@ from approve_watch.db import (
     claim_decision,
     connect,
     fetch_decision,
+    hourly_counts_7d,
     insert_pending,
+    last_approved,
     list_pending,
     pending_count,
     set_label,
+    total_before,
 )
 
 
@@ -50,3 +53,52 @@ def test_set_label(tmp_db) -> None:
         set_label(conn, rid, None)
         row = conn.execute("SELECT label FROM approvals WHERE id=?", (rid,)).fetchone()
         assert row["label"] is None
+
+
+def test_last_approved_returns_most_recent_approval(tmp_db) -> None:
+    """Drives the dashboard's middle-row 'last approved' panel."""
+    with connect(tmp_db) as conn:
+        # No approvals yet.
+        assert last_approved(conn) is None
+
+        a = insert_pending(conn, "ls -la", "tmux:s:0.0")
+        b = insert_pending(conn, "rm -rf /tmp/x", "tmux:s:0.0", kind="other")
+        c = insert_pending(conn, "git status", "tmux:s:0.0")
+
+        # Only `b` is approved.
+        claim_decision(conn, b, approved=1, decided_by="user")
+        row = last_approved(conn)
+        assert row is not None
+        assert row["id"] == b
+        assert row["command"] == "rm -rf /tmp/x"
+        assert row["decided_by"] == "user"
+
+        # Now approve `c` afterwards — must surface the more recent one.
+        claim_decision(conn, c, approved=1, decided_by="auto-watcher")
+        row = last_approved(conn)
+        assert row is not None
+        assert row["id"] == c
+
+        # Rejected rows do not count.
+        claim_decision(conn, a, approved=0, decided_by="user")
+        row = last_approved(conn)
+        assert row is not None
+        assert row["id"] == c
+
+
+def test_hourly_counts_7d_and_total_before(tmp_db) -> None:
+    with connect(tmp_db) as conn:
+        # Empty DB.
+        assert hourly_counts_7d(conn) == []
+        assert total_before(conn, "9999-01-01") == 0
+
+        for cmd in ["a", "b", "c"]:
+            insert_pending(conn, cmd, "tmux:s:0.0")
+
+        points = hourly_counts_7d(conn)
+        # All three rows fall in the same hour bucket.
+        assert sum(n for _, n in points) == 3
+        # All three rows are before any future timestamp.
+        assert total_before(conn, "9999-01-01") == 3
+        # None are before a past timestamp.
+        assert total_before(conn, "1970-01-01") == 0

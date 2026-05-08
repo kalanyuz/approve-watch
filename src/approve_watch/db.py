@@ -115,6 +115,46 @@ def hourly_counts_24h(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     return [(r["bucket"], r["n"]) for r in rows]
 
 
+def hourly_counts_7d(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    """Counts per hour bucket over the last 7 days. Used by the timeline
+    chart (continuous line at hourly resolution across days) and as the
+    base for the cumulative chart."""
+    rows = conn.execute(
+        """
+        SELECT strftime('%Y-%m-%d %H:00', asked_at) AS bucket, COUNT(*) AS n
+        FROM approvals
+        WHERE asked_at >= datetime('now', '-7 days')
+        GROUP BY bucket
+        ORDER BY bucket
+        """
+    ).fetchall()
+    return [(r["bucket"], r["n"]) for r in rows]
+
+
+def total_before(conn: sqlite3.Connection, iso_cutoff: str) -> int:
+    """Count of approvals strictly before the given ISO timestamp. Used to
+    seed the cumulative chart so the line continues from history rather
+    than restarting at zero."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM approvals WHERE asked_at < ?",
+        (iso_cutoff,),
+    ).fetchone()
+    return int(row["n"])
+
+
+def last_approved(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    """Most recent row that resolved as approved (1). Drives the
+    'last approved' middle-row panel."""
+    return conn.execute(
+        """
+        SELECT * FROM approvals
+        WHERE approved = 1 AND decided_at IS NOT NULL
+        ORDER BY decided_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+
 def daily_counts_30d(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     rows = conn.execute(
         """
