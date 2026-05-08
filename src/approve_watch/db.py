@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   asked_at    TEXT    NOT NULL,
   command     TEXT    NOT NULL,
   source      TEXT    NOT NULL,
+  kind        TEXT    NOT NULL DEFAULT 'shell_command',
   approved    INTEGER,
   decided_at  TEXT,
   decided_by  TEXT,
@@ -33,6 +34,12 @@ def init_db(path: Path | None = None) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(p) as conn:
         conn.executescript(SCHEMA)
+        # Lightweight forward migration for DBs created before `kind` existed.
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(approvals)")}
+        if "kind" not in cols:
+            conn.execute(
+                "ALTER TABLE approvals ADD COLUMN kind TEXT NOT NULL DEFAULT 'shell_command'"
+            )
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
     return p
@@ -52,10 +59,12 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def insert_pending(conn: sqlite3.Connection, command: str, source: str) -> int:
+def insert_pending(
+    conn: sqlite3.Connection, command: str, source: str, kind: str = "shell_command"
+) -> int:
     cur = conn.execute(
-        "INSERT INTO approvals (asked_at, command, source) VALUES (?, ?, ?)",
-        (now_iso(), command, source),
+        "INSERT INTO approvals (asked_at, command, source, kind) VALUES (?, ?, ?, ?)",
+        (now_iso(), command, source, kind),
     )
     rid = cur.lastrowid
     assert rid is not None
