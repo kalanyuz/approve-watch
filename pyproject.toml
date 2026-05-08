@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "approve-watch"
+version = "0.1.0"
+description = "Watch cursor-agent / cmux panes, log command-approval prompts to SQLite, and approve them via a Textual dashboard."
+requires-python = ">=3.11"
+dependencies = [
+    "textual>=0.80",
+    "textual-plotext>=0.2.1",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+approve-watch = "approve_watch.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/approve_watch"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
