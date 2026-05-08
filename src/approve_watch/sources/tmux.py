@@ -7,11 +7,15 @@ from approve_watch.sources.base import PaneId
 
 
 class TmuxSource:
-    """Pane source backed by the tmux(1) CLI."""
+    """Pane source backed by the tmux(1) CLI.
+
+    Sends literal "y"/"n" because cursor-agent's approval prompt is a TUI that
+    consumes those as hotkeys without Enter.
+    """
 
     name = "tmux"
 
-    def __init__(self, capture_lines: int = 50) -> None:
+    def __init__(self, capture_lines: int = 80) -> None:
         if not shutil.which("tmux"):
             raise RuntimeError("tmux not found in PATH")
         self._capture_lines = capture_lines
@@ -41,8 +45,8 @@ class TmuxSource:
         )
         return out.stdout if out.returncode == 0 else ""
 
-    def send_enter(self, pane: PaneId) -> None:
-        subprocess.run(["tmux", "send-keys", "-t", pane, "Enter"], check=False)
+    def send_approve(self, pane: PaneId) -> None:
+        subprocess.run(["tmux", "send-keys", "-t", pane, "y"], check=False)
 
     def send_reject(self, pane: PaneId) -> None:
-        subprocess.run(["tmux", "send-keys", "-t", pane, "n", "Enter"], check=False)
+        subprocess.run(["tmux", "send-keys", "-t", pane, "n"], check=False)

@@ -37,12 +37,12 @@ class FakeSource:
     def capture(self, pane: PaneId) -> str:
         return self._buffers.get(pane, "")
 
-    def send_enter(self, pane: PaneId) -> None:
-        self.sent.append((pane, "Enter"))
+    def send_approve(self, pane: PaneId) -> None:
+        self.sent.append((pane, "y"))
         self._buffers[pane] = CLEARED_TEXT
 
     def send_reject(self, pane: PaneId) -> None:
-        self.sent.append((pane, "n+Enter"))
+        self.sent.append((pane, "n"))
         self._buffers[pane] = CLEARED_TEXT
 
 
@@ -67,7 +67,7 @@ async def test_auto_approves_after_timeout(tmp_db: Path, fast_timeouts: None) ->
     elapsed = time.monotonic() - t0
     assert 0.4 <= elapsed <= 1.5
 
-    assert src.sent == [("s:0.0", "Enter")]
+    assert src.sent == [("s:0.0", "y")]
     with connect(tmp_db) as conn:
         rows = recent(conn)
     assert len(rows) == 1
@@ -94,7 +94,7 @@ async def test_user_approval_preempts(tmp_db: Path, fast_timeouts: None) -> None
         user_decides(),
     )
 
-    assert src.sent == [("s:0.0", "Enter")]
+    assert src.sent == [("s:0.0", "y")]
     with connect(tmp_db) as conn:
         rows = recent(conn)
     assert rows[0]["decided_by"] == "user"
@@ -116,7 +116,7 @@ async def test_user_reject_sends_n(tmp_db: Path, fast_timeouts: None) -> None:
         user_decides(),
     )
 
-    assert src.sent == [("s:0.0", "n+Enter")]
+    assert src.sent == [("s:0.0", "n")]
     with connect(tmp_db) as conn:
         rows = recent(conn)
     assert rows[0]["approved"] == 0

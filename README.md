@@ -38,6 +38,19 @@ approve-watch watch &          # start the watcher in the background
 approve-watch dash             # open the dashboard (separate terminal)
 ```
 
+The watcher auto-discovers panes:
+
+- If `cmux` is on `PATH`, it parses `cmux tree --all` and watches every
+  `[terminal]` surface across all workspaces. No `--workspace` / `--surface`
+  flags. Honors `CMUX_SOCKET_PATH` if set.
+- Otherwise it falls back to `tmux list-panes -a` and watches every pane.
+- Force one with `approve-watch watch --source tmux` or `--source cmux`.
+
+When the regex matches, the watcher inserts a row with `approved=NULL`, waits
+3.2 s, then sends `y` (approve) or `n` (reject) — single-key hotkeys that
+match cursor-agent's TUI. The dashboard's 3 s countdown can preempt the
+watcher.
+
 ## Calibration
 
 The default regex was calibrated against this real cursor-agent prompt:
@@ -64,10 +77,10 @@ To capture the live prompt for inspection while iterating:
 tmux capture-pane -p -t <pane> -S -50 > /tmp/cap.txt
 ```
 
-`coder/cmux`'s CLI surface varies by version, so the `cmux` source is a stub
-in `src/approve_watch/sources/cmux.py`. Fill in the equivalent of `list-panes`,
-`capture`, `send-enter`, and `send-reject` for cmux on your machine. The rest
-of the system is unchanged.
+If your cmux version's tree output looks different and `parse_tree`
+mis-discovers surfaces, paste the output of `cmux tree --all` into a
+fresh test in `tests/test_cmux_parser.py` and adjust the regex set in
+`src/approve_watch/sources/cmux.py`.
 
 ## Schema
 

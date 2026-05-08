@@ -94,7 +94,7 @@ async def _handle_pane(
         decided_by,
     )
     if approved == 1:
-        await asyncio.to_thread(source.send_enter, pane)
+        await asyncio.to_thread(source.send_approve, pane)
     else:
         await asyncio.to_thread(source.send_reject, pane)
 
