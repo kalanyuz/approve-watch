@@ -45,6 +45,24 @@ PROMPT_EDIT = (
     "→ Edit (once) (y)\n"
     "  Skip (esc or n)\n"
 )
+# Real cursor-agent web-fetch prompt — three options, with an "Always allow"
+# domain-pin row sandwiched between (y) and Skip (esc or n).
+PROMPT_WEB_FETCH = (
+    "🌐 Web Fetch: https://www.llm-prices.com/current-v1.json\n"
+    "\n"
+    " Allow this web fetch?\n"
+    "  → Fetch (y)\n"
+    "    Always allow [www.llm-prices.com](https://www.llm-prices.com) (tab)\n"
+    "    Skip (esc or n)\n"
+)
+PROMPT_WEB_FETCH_BOXED = (
+    "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n"
+    " Allow this web fetch?\n"
+    "  → Fetch (y)\n"
+    "    Always allow [example.com](https://example.com) (tab)\n"
+    "    Skip (esc or n)\n"
+    "▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n"
+)
 
 
 def test_strip_ansi() -> None:
@@ -99,6 +117,22 @@ def test_other_tier_matches_edit_prompt() -> None:
     assert m is not None
     assert m.kind == KIND_OTHER
     assert m.command == "src/main.py"
+
+
+def test_other_tier_matches_web_fetch_prompt() -> None:
+    """Web-fetch prompts have a 3-option menu (Fetch / Always allow / Skip);
+    the regex must tolerate intermediate option lines between (y) and Skip."""
+    m = make_detector().match(PROMPT_WEB_FETCH)
+    assert m is not None
+    assert m.kind == KIND_OTHER
+    assert m.command == "Allow this web fetch?"
+
+
+def test_other_tier_matches_boxed_web_fetch_prompt() -> None:
+    m = make_detector().match(PROMPT_WEB_FETCH_BOXED)
+    assert m is not None
+    assert m.kind == KIND_OTHER
+    assert m.command == "Allow this web fetch?"
 
 
 def test_shell_takes_precedence_over_other() -> None:
