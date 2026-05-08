@@ -71,6 +71,7 @@ async def _handle_pane(
     seen: _SignatureCache,
     db_path: Path | None,
     timeouts: dict[str, float] | None = None,
+    post_decision_timeout: float = 5.0,
 ) -> None:
     raw = await asyncio.to_thread(source.capture, pane)
     if not raw:
@@ -102,13 +103,26 @@ async def _handle_pane(
     else:
         await asyncio.to_thread(source.send_reject, pane)
 
-    # Wait for the prompt to clear so we don't re-trigger on stale buffer.
-    for _ in range(20):  # up to ~2s
+    # Only retire the signature once we observe the prompt is gone (or
+    # replaced by a different-sig prompt). If the buffer still shows the
+    # same prompt when this window closes — slow repaint, dropped
+    # keystroke, etc. — keep the signature in `seen` so the next poll
+    # cycle can't insert a second row and send a second keystroke. The
+    # LRU bound (256 entries) is the only thing that retires it then.
+    deadline = time.monotonic() + post_decision_timeout
+    while time.monotonic() < deadline:
         await asyncio.sleep(0.1)
         post = await asyncio.to_thread(source.capture, pane)
-        if detector.match(post) is None:
-            break
-    seen.discard(m.signature)
+        nxt = detector.match(post)
+        if nxt is None or nxt.signature != m.signature:
+            seen.discard(m.signature)
+            return
+    log.warning(
+        "pane %s: prompt did not clear after keystroke; keeping sig %s in"
+        " seen-cache to avoid double-approve",
+        pane,
+        m.signature,
+    )
 
 
 async def watch_loop(
@@ -118,6 +132,7 @@ async def watch_loop(
     pane_filter: Iterable[PaneId] | None = None,
     stop: asyncio.Event | None = None,
     timeouts: dict[str, float] | None = None,
+    post_decision_timeout: float = 5.0,
 ) -> None:
     """Run forever (or until ``stop`` is set), polling each pane in parallel.
 
@@ -143,7 +158,10 @@ async def watch_loop(
             if task is not None and not task.done():
                 continue
             in_flight[pane] = asyncio.create_task(
-                _handle_pane(source, pane, detector, seen, db_path, timeouts),
+                _handle_pane(
+                    source, pane, detector, seen, db_path, timeouts,
+                    post_decision_timeout,
+                ),
                 name=f"approve-watch:{pane}",
             )
 

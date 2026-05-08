@@ -69,7 +69,10 @@ async def test_auto_approves_after_shell_timeout(tmp_db: Path) -> None:
     src = FakeSource(["s:0.0"])
     seen = _SignatureCache()
     t0 = time.monotonic()
-    await _handle_pane(src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS)
+    await _handle_pane(
+        src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
     elapsed = time.monotonic() - t0
     assert 0.4 <= elapsed <= 1.5
 
@@ -89,7 +92,10 @@ async def test_other_tier_uses_longer_timeout(tmp_db: Path) -> None:
     src = FakeSource(["s:0.0"], prompt=DELETE_PROMPT)
     seen = _SignatureCache()
     t0 = time.monotonic()
-    await _handle_pane(src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS)
+    await _handle_pane(
+        src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
     elapsed = time.monotonic() - t0
     # 1.0s tier-2 vs 0.5s tier-1 — so we expect ~1.0s, never less than 0.9s.
     assert 0.9 <= elapsed <= 2.0
@@ -111,7 +117,10 @@ async def test_user_approval_preempts(tmp_db: Path) -> None:
             assert claim_decision(conn, rid, approved=1, decided_by="user")
 
     await asyncio.gather(
-        _handle_pane(src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS),
+        _handle_pane(
+            src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+            post_decision_timeout=0.3,
+        ),
         user_decides(),
     )
 
@@ -132,7 +141,10 @@ async def test_user_reject_sends_n(tmp_db: Path) -> None:
             assert claim_decision(conn, rid, approved=0, decided_by="user")
 
     await asyncio.gather(
-        _handle_pane(src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS),
+        _handle_pane(
+            src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+            post_decision_timeout=0.3,
+        ),
         user_decides(),
     )
 
@@ -147,7 +159,10 @@ async def test_no_match_no_action(tmp_db: Path) -> None:
     src = FakeSource(["s:0.0"])
     src._buffers["s:0.0"] = "boring output\n$ pwd\n/home/me\nNo prompt to approve here.\n"
     seen = _SignatureCache()
-    await _handle_pane(src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS)
+    await _handle_pane(
+        src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
     assert src.sent == []
     with connect(tmp_db) as conn:
         assert recent(conn) == []
@@ -157,8 +172,72 @@ async def test_watch_loop_can_stop(tmp_db: Path) -> None:
     src = FakeSource([])
     stop = asyncio.Event()
     task = asyncio.create_task(
-        watch_loop(src, make_detector(), tmp_db, stop=stop, timeouts=FAST_TIMEOUTS)
+        watch_loop(
+            src, make_detector(), tmp_db, stop=stop, timeouts=FAST_TIMEOUTS,
+            post_decision_timeout=0.3,
+        )
     )
     await asyncio.sleep(0.3)
     stop.set()
     await asyncio.wait_for(task, timeout=1.0)
+
+
+async def test_no_duplicate_when_buffer_does_not_clear(tmp_db: Path) -> None:
+    """Regression: cursor-agent's TUI sometimes hasn't repainted by the time
+    we capture again after sending y. Previously the watcher unconditionally
+    retired the signature after a 2s window, so the next poll would see the
+    stale prompt, treat it as new, insert a second row, and send a second y
+    (which landed in the now-empty input box). The fix keeps the signature
+    in `seen` until we observe the prompt is actually gone."""
+
+    class StaleSource(FakeSource):
+        def send_approve(self, pane: PaneId) -> None:
+            # Record the keystroke but leave the buffer unchanged —
+            # simulates a slow repaint or a dropped keystroke.
+            self.sent.append((pane, "y"))
+
+    src = StaleSource(["s:0.0"])
+    seen = _SignatureCache()
+    detector = make_detector()
+
+    # First call: detect, decide, send y. Post-decision window expires
+    # while the buffer still shows the prompt, so the signature stays in
+    # `seen`.
+    await _handle_pane(
+        src, "s:0.0", detector, seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
+    assert src.sent == [("s:0.0", "y")]
+    with connect(tmp_db) as conn:
+        rows = recent(conn)
+    assert len(rows) == 1
+
+    # Second call against the still-stale buffer: the signature is in
+    # `seen`, so we must not insert another row or send another keystroke.
+    await _handle_pane(
+        src, "s:0.0", detector, seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
+    assert src.sent == [("s:0.0", "y")], "no extra y should be sent"
+    with connect(tmp_db) as conn:
+        rows = recent(conn)
+    assert len(rows) == 1, "no duplicate row should be inserted"
+
+
+async def test_signature_retired_after_prompt_clears(tmp_db: Path) -> None:
+    """Counterpart to the dedup test: when the buffer DOES clear (normal
+    case), the signature is retired so a legitimate re-run of the same
+    command is handled fresh."""
+    src = FakeSource(["s:0.0"])
+    seen = _SignatureCache()
+    detector = make_detector()
+
+    await _handle_pane(
+        src, "s:0.0", detector, seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
+    # After the call, FakeSource.send_approve cleared the buffer, so the
+    # signature should have been retired.
+    m = detector.match(SHELL_PROMPT)
+    assert m is not None
+    assert m.signature not in seen
