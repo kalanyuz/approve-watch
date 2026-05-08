@@ -3,6 +3,7 @@ from __future__ import annotations
 from approve_watch.db import (
     claim_decision,
     connect,
+    daily_counts_all,
     fetch_decision,
     hourly_counts_7d,
     insert_pending,
@@ -10,7 +11,6 @@ from approve_watch.db import (
     list_pending,
     pending_count,
     set_label,
-    total_before,
 )
 
 
@@ -86,19 +86,19 @@ def test_last_approved_returns_most_recent_approval(tmp_db) -> None:
         assert row["id"] == c
 
 
-def test_hourly_counts_7d_and_total_before(tmp_db) -> None:
+def test_hourly_counts_7d_and_daily_counts_all(tmp_db) -> None:
     with connect(tmp_db) as conn:
-        # Empty DB.
+        # Empty DB — both queries return empty.
         assert hourly_counts_7d(conn) == []
-        assert total_before(conn, "9999-01-01") == 0
+        assert daily_counts_all(conn) == []
 
         for cmd in ["a", "b", "c"]:
             insert_pending(conn, cmd, "tmux:s:0.0")
 
-        points = hourly_counts_7d(conn)
-        # All three rows fall in the same hour bucket.
-        assert sum(n for _, n in points) == 3
-        # All three rows are before any future timestamp.
-        assert total_before(conn, "9999-01-01") == 3
-        # None are before a past timestamp.
-        assert total_before(conn, "1970-01-01") == 0
+        # All three rows fall in the same hour bucket and the same day
+        # bucket, so each query returns a single bucket of size 3.
+        hours = hourly_counts_7d(conn)
+        days = daily_counts_all(conn)
+        assert sum(n for _, n in hours) == 3
+        assert len(days) == 1
+        assert days[0][1] == 3
