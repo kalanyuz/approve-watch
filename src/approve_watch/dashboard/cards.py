@@ -13,15 +13,15 @@ TICK_S = 0.1
 
 
 class ApprovalCard(Vertical):
-    """A single approval prompt awaiting user decision.
-
-    Has a 3 s countdown; on expiry, auto-approves. The watcher in another
-    process will see the row decision and inject the keystroke.
-    """
+    """A single approval prompt awaiting decision. Layout mirrors
+    cursor-agent's own confirmation TUI: command at the top, then a
+    countdown bar, then a vertical stack of outlined Yes/No choices.
+    On expiry, auto-approves; the watcher in another process picks up
+    the row decision and injects the keystroke."""
 
     DEFAULT_CSS = """
     ApprovalCard {
-        width: 40;
+        width: 38;
         height: 100%;
         border: round $accent;
         padding: 0 1;
@@ -30,12 +30,29 @@ class ApprovalCard(Vertical):
     }
     ApprovalCard.kind-other { border: round $warning; }
     ApprovalCard.resolved   { border: round $success; }
-    ApprovalCard .cmd  { color: $text; text-style: bold; }
     ApprovalCard .meta { color: $text-muted; }
+    ApprovalCard .cmd  { color: $text; text-style: bold; padding: 1 0; }
     ApprovalCard .kind-badge { color: $warning; text-style: bold; }
-    ApprovalCard Horizontal { height: 3; }
-    ApprovalCard Button { width: 1fr; }
-    ApprovalCard ProgressBar { width: 100%; height: 1; }
+    ApprovalCard ProgressBar { width: 100%; height: 1; padding: 0 0 1 0; }
+
+    ApprovalCard .actions { height: auto; width: 100%; }
+    ApprovalCard .actions Button {
+        width: 100%;
+        height: 3;
+        margin: 0 0 1 0;
+        border: round $accent;
+        background: $boost;
+        color: $text;
+    }
+    ApprovalCard .actions Button#yes {
+        border: round $success;
+        color: $success;
+    }
+    ApprovalCard .actions Button#no {
+        border: round $error;
+        color: $error;
+    }
+    ApprovalCard .actions Button:focus { text-style: bold; }
     """
 
     elapsed: reactive[float] = reactive(0.0)
@@ -68,8 +85,6 @@ class ApprovalCard(Vertical):
             self.add_class("kind-other")
 
     def compose(self) -> ComposeResult:
-        from textual.containers import Horizontal
-
         yield Static(f"#{self.row_id}  {self.asked_at[:19]}", classes="meta")
         yield Static(f"src: {self.source}", classes="meta")
         if self.kind != KIND_SHELL:
@@ -83,9 +98,10 @@ class ApprovalCard(Vertical):
             total=self._timeout, show_eta=False, show_percentage=False
         )
         yield self._bar
-        yield Horizontal(
-            Button("Yes", id="yes", variant="success"),
-            Button("No", id="no", variant="error"),
+        yield Vertical(
+            Button("Yes  (y)", id="yes"),
+            Button("No  (esc or n)", id="no"),
+            classes="actions",
         )
 
     def on_mount(self) -> None:
@@ -109,18 +125,14 @@ class ApprovalCard(Vertical):
     def _decide(self, *, approved: int, by: str) -> None:
         if self._resolved:
             return
-        # First check whether some other process already decided this row.
         with connect() as conn:
-            existing_approved, existing_by = fetch_decision(conn, self.row_id)
+            existing_approved, _ = fetch_decision(conn, self.row_id)
             if existing_approved is not None:
-                # Already decided elsewhere; just mark and animate out.
+                self._resolved = True
+            elif claim_decision(conn, self.row_id, approved=approved, decided_by=by):
                 self._resolved = True
             else:
-                if claim_decision(conn, self.row_id, approved=approved, decided_by=by):
-                    self._resolved = True
-                else:
-                    # Lost the race; refresh and treat as resolved.
-                    self._resolved = True
+                self._resolved = True
         if self._timer is not None:
             self._timer.stop()
         self.add_class("resolved")

@@ -7,19 +7,26 @@ from textual.widgets import Footer, Header, Static
 
 from approve_watch.db import connect, list_pending, pending_count, total_today
 from approve_watch.dashboard.cards import ApprovalCard
-from approve_watch.dashboard.charts import DailyChart, HourlyChart
+from approve_watch.dashboard.charts import CumulativeChart, TimelineChart
 from approve_watch.dashboard.labels import LabelPane
+from approve_watch.dashboard.last_approved import LastApprovedPanel
 
 
 class ApproveWatchApp(App[None]):
-    """Two-row dashboard: charts on top, approval-card queue on bottom."""
+    """Three-row dashboard:
+
+    * Top — line charts: timeline (last 7d, hourly) + cumulative.
+    * Middle — last-approved panel (Dolphie-style label/value cells).
+    * Bottom — pending-approvals queue with cursor-prompt-style cards.
+    """
 
     CSS = """
     Screen { layers: base overlay; }
     #root { height: 100%; }
-    #charts { height: 50%; padding: 0 1; }
+    #charts { height: 1fr; padding: 0 1; }
     #charts > * { width: 1fr; height: 100%; padding: 0 1; }
-    #queue-row { height: 50%; border-top: solid $primary; }
+    #last-approved-row { height: 5; padding: 0 1; }
+    #queue-row { height: 1fr; border-top: solid $primary; }
     #queue-label { width: 18; padding: 1 1; color: $text-muted; }
     #queue { height: 100%; }
     #status-bar { height: 1; padding: 0 1; background: $boost; }
@@ -34,6 +41,7 @@ class ApproveWatchApp(App[None]):
 
     POLL_PENDING_S = 0.2
     REFRESH_CHARTS_S = 5.0
+    REFRESH_LAST_APPROVED_S = 1.0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -41,10 +49,13 @@ class ApproveWatchApp(App[None]):
             self._status = Static("loading…", id="status-bar")
             yield self._status
             with Horizontal(id="charts"):
-                self._hourly = HourlyChart()
-                self._daily = DailyChart()
-                yield self._hourly
-                yield self._daily
+                self._timeline = TimelineChart()
+                self._cumulative = CumulativeChart()
+                yield self._timeline
+                yield self._cumulative
+            self._last_approved = LastApprovedPanel()
+            with Horizontal(id="last-approved-row"):
+                yield self._last_approved
             with Horizontal(id="queue-row"):
                 yield Static("Pending →", id="queue-label")
                 self._queue = HorizontalScroll(id="queue")
@@ -59,11 +70,15 @@ class ApproveWatchApp(App[None]):
         self._refresh_status()
         self.set_interval(self.POLL_PENDING_S, self._poll_pending)
         self.set_interval(self.REFRESH_CHARTS_S, self._refresh_charts)
+        self.set_interval(self.REFRESH_LAST_APPROVED_S, self._refresh_last_approved)
         self.set_interval(1.0, self._refresh_status)
 
     def _refresh_charts(self) -> None:
-        self._hourly.refresh_data()
-        self._daily.refresh_data()
+        self._timeline.refresh_data()
+        self._cumulative.refresh_data()
+
+    def _refresh_last_approved(self) -> None:
+        self._last_approved.refresh_data()
 
     def _refresh_status(self) -> None:
         with connect() as conn:
@@ -96,10 +111,13 @@ class ApproveWatchApp(App[None]):
 
     def on_approval_card_resolved(self, message: ApprovalCard.Resolved) -> None:
         self._known_pending.discard(message.row_id)
+        # A resolved card means the last-approved panel is probably stale.
+        self._refresh_last_approved()
 
     def action_toggle_labels(self) -> None:
         self._labels.toggle()
 
     def action_refresh_now(self) -> None:
         self._refresh_charts()
+        self._refresh_last_approved()
         self._refresh_status()
