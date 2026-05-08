@@ -6,7 +6,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Button, ProgressBar, Static
 
-from approve_watch.config import DASHBOARD_TIMEOUT_S
+from approve_watch.config import KIND_DASHBOARD_TIMEOUTS_S, KIND_SHELL
 from approve_watch.db import claim_decision, connect, fetch_decision
 
 TICK_S = 0.1
@@ -28,9 +28,11 @@ class ApprovalCard(Vertical):
         margin: 0 1;
         background: $boost;
     }
-    ApprovalCard.resolved { border: round $success; }
-    ApprovalCard .cmd { color: $text; text-style: bold; }
+    ApprovalCard.kind-other { border: round $warning; }
+    ApprovalCard.resolved   { border: round $success; }
+    ApprovalCard .cmd  { color: $text; text-style: bold; }
     ApprovalCard .meta { color: $text-muted; }
+    ApprovalCard .kind-badge { color: $warning; text-style: bold; }
     ApprovalCard Horizontal { height: 3; }
     ApprovalCard Button { width: 1fr; }
     ApprovalCard ProgressBar { width: 100%; height: 1; }
@@ -43,22 +45,43 @@ class ApprovalCard(Vertical):
             super().__init__()
             self.row_id = row_id
 
-    def __init__(self, row_id: int, command: str, source: str, asked_at: str) -> None:
+    def __init__(
+        self,
+        row_id: int,
+        command: str,
+        source: str,
+        asked_at: str,
+        kind: str = KIND_SHELL,
+    ) -> None:
         super().__init__(id=f"card-{row_id}")
         self.row_id = row_id
         self.command = command
         self.source = source
         self.asked_at = asked_at
+        self.kind = kind
+        self._timeout = KIND_DASHBOARD_TIMEOUTS_S.get(
+            kind, KIND_DASHBOARD_TIMEOUTS_S[KIND_SHELL]
+        )
         self._timer = None
         self._resolved = False
+        if kind != KIND_SHELL:
+            self.add_class("kind-other")
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal
 
         yield Static(f"#{self.row_id}  {self.asked_at[:19]}", classes="meta")
         yield Static(f"src: {self.source}", classes="meta")
+        if self.kind != KIND_SHELL:
+            mins = int(self._timeout // 60)
+            yield Static(
+                f"[{self.kind}]  auto-approve in ~{mins}m",
+                classes="kind-badge",
+            )
         yield Static(self.command, classes="cmd")
-        self._bar = ProgressBar(total=DASHBOARD_TIMEOUT_S, show_eta=False, show_percentage=False)
+        self._bar = ProgressBar(
+            total=self._timeout, show_eta=False, show_percentage=False
+        )
         yield self._bar
         yield Horizontal(
             Button("Yes", id="yes", variant="success"),
@@ -73,8 +96,8 @@ class ApprovalCard(Vertical):
         if self._resolved:
             return
         self.elapsed = round(self.elapsed + TICK_S, 2)
-        self._bar.update(progress=min(self.elapsed, DASHBOARD_TIMEOUT_S))
-        if self.elapsed >= DASHBOARD_TIMEOUT_S:
+        self._bar.update(progress=min(self.elapsed, self._timeout))
+        if self.elapsed >= self._timeout:
             self._decide(approved=1, by="auto-dashboard")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
