@@ -199,6 +199,23 @@ def recent_approved(
     ).fetchall()
 
 
+def daily_counts_since(
+    conn: sqlite3.Connection, days: int
+) -> list[tuple[str, int]]:
+    """Counts per day over the last ``days`` days (today inclusive).
+    Drives the GitHub-style heatmap tab."""
+    rows = conn.execute(
+        f"""
+        SELECT strftime('%Y-%m-%d', asked_at) AS bucket, COUNT(*) AS n
+        FROM approvals
+        WHERE asked_at >= datetime('now', '-{int(days)} days')
+        GROUP BY bucket
+        ORDER BY bucket
+        """
+    ).fetchall()
+    return [(r["bucket"], r["n"]) for r in rows]
+
+
 def daily_counts_30d(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     rows = conn.execute(
         """
