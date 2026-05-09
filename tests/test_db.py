@@ -11,6 +11,7 @@ from approve_watch.db import (
     minute_counts_60m,
     pending_count,
     set_label,
+    total_before,
 )
 
 
@@ -102,3 +103,19 @@ def test_hourly_counts_7d_and_minute_counts_60m(tmp_db) -> None:
         assert sum(n for _, n in hours) == 3
         assert len(minutes) == 1
         assert minutes[0][1] == 3
+
+
+def test_total_before_seeds_cumulative_chart(tmp_db) -> None:
+    """The CumulativeChart needs an all-time count from before its
+    60-minute viewport so the visible line continues from history rather
+    than restarting at zero each time."""
+    with connect(tmp_db) as conn:
+        assert total_before(conn, "9999-01-01") == 0
+
+        for cmd in ["a", "b", "c"]:
+            insert_pending(conn, cmd, "tmux:s:0.0")
+
+        # All three rows are before any future timestamp.
+        assert total_before(conn, "9999-01-01") == 3
+        # None are before the unix epoch.
+        assert total_before(conn, "1970-01-01") == 0

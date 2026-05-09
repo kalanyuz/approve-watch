@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from textual_plotext import PlotextPlot
 
-from approve_watch.db import connect, hourly_counts_7d, minute_counts_60m
+from approve_watch.db import (
+    connect,
+    hourly_counts_7d,
+    minute_counts_60m,
+    total_before,
+)
 
 HOURS = 7 * 24      # one week of hourly buckets (left chart)
 MINUTES = 60        # rolling cumulative window (right chart)
@@ -89,20 +94,26 @@ class TimelineChart(PlotextPlot):
 
 
 class CumulativeChart(PlotextPlot):
-    """Rolling cumulative approvals — per-minute cumsum across the last
-    60 minutes. The X-axis is fixed-width (60 minute buckets) and slides
-    forward as time passes, so the line always extends to the right edge
-    even during quiet stretches. Tick labels are full ``HH:MM``
-    timestamps at evenly-spaced minute marks."""
+    """All-time cumulative approvals, viewed through a sliding 60-minute
+    window. The Y-axis is the running total of every approval ever
+    recorded (so the line never resets); the X-axis only shows the most
+    recent 60 minutes and slides forward each minute. Tick labels are
+    full ``HH:MM`` timestamps at evenly-spaced minute marks."""
 
     DEFAULT_CSS = "CumulativeChart { height: 100%; }"
 
     def refresh_data(self) -> None:
         with connect() as conn:
             points = minute_counts_60m(conn)
+            # asked_at is stored as UTC ISO (see db.now_iso), so the
+            # cutoff has to be UTC too.
+            cutoff_dt = datetime.now(timezone.utc).replace(
+                second=0, microsecond=0
+            ) - timedelta(minutes=MINUTES)
+            baseline = total_before(conn, cutoff_dt.isoformat(timespec="microseconds"))
         x, per_minute, stamps = _minute_series_60m(points)
 
-        running = 0
+        running = baseline
         cum: list[int] = []
         for n in per_minute:
             running += n
@@ -116,6 +127,6 @@ class CumulativeChart(PlotextPlot):
         plt.theme("pro")
         plt.plot(x, cum, marker="braille")
         plt.xticks(tick_idx, tick_lbl)
-        plt.title("Cumulative approvals (last 60 min)")
-        plt.ylabel("total / 60m")
+        plt.title("Cumulative approvals (all time, last 60 min view)")
+        plt.ylabel("total")
         self.refresh()
