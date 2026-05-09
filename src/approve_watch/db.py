@@ -131,6 +131,22 @@ def hourly_counts_7d(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     return [(r["bucket"], r["n"]) for r in rows]
 
 
+def minute_counts_60m(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    """Counts per minute over the last 60 minutes. Drives the cumulative
+    rolling-window chart (per-minute cumsum across a 60 min wide x-axis
+    that slides forward as time passes)."""
+    rows = conn.execute(
+        """
+        SELECT strftime('%Y-%m-%d %H:%M', asked_at) AS bucket, COUNT(*) AS n
+        FROM approvals
+        WHERE asked_at >= datetime('now', '-60 minutes')
+        GROUP BY bucket
+        ORDER BY bucket
+        """
+    ).fetchall()
+    return [(r["bucket"], r["n"]) for r in rows]
+
+
 def daily_counts_all(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     """All-time counts per day. Drives the cumulative chart."""
     rows = conn.execute(
