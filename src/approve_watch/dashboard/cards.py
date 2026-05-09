@@ -6,7 +6,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Button, ProgressBar, Static
 
-from approve_watch.config import KIND_DASHBOARD_TIMEOUTS_S, KIND_SHELL
+from approve_watch.config import KIND_DANGEROUS, KIND_DASHBOARD_TIMEOUTS_S, KIND_SHELL
 from approve_watch.db import claim_decision, connect, fetch_decision
 
 TICK_S = 0.1
@@ -28,11 +28,19 @@ class ApprovalCard(Vertical):
         margin: 0 1;
         background: $boost;
     }
-    ApprovalCard.kind-other { border: round $warning; }
-    ApprovalCard.resolved   { border: round $success; }
+    ApprovalCard.kind-other     { border: round $warning; }
+    ApprovalCard.kind-dangerous {
+        border: heavy $error;
+        background: $error 15%;
+    }
+    ApprovalCard.resolved       { border: round $success; }
     ApprovalCard .meta { color: $text-muted; }
     ApprovalCard .cmd  { color: $text; text-style: bold; padding: 1 0; }
+    ApprovalCard.kind-dangerous .cmd { color: $error; text-style: bold; }
     ApprovalCard .kind-badge { color: $warning; text-style: bold; }
+    ApprovalCard.kind-dangerous .kind-badge {
+        color: $error; text-style: bold reverse;
+    }
     ApprovalCard ProgressBar { width: 100%; height: 1; padding: 0 0 1 0; }
 
     ApprovalCard .actions { height: auto; width: 100%; }
@@ -81,13 +89,20 @@ class ApprovalCard(Vertical):
         )
         self._timer = None
         self._resolved = False
-        if kind != KIND_SHELL:
+        if kind == KIND_DANGEROUS:
+            self.add_class("kind-dangerous")
+        elif kind != KIND_SHELL:
             self.add_class("kind-other")
 
     def compose(self) -> ComposeResult:
         yield Static(f"#{self.row_id}  {self.asked_at[:19]}", classes="meta")
         yield Static(f"src: {self.source}", classes="meta")
-        if self.kind != KIND_SHELL:
+        if self.kind == KIND_DANGEROUS:
+            yield Static(
+                "⚠  DANGEROUS — manual decision required",
+                classes="kind-badge",
+            )
+        elif self.kind != KIND_SHELL:
             mins = int(self._timeout // 60)
             yield Static(
                 f"[{self.kind}]  auto-approve in ~{mins}m",
