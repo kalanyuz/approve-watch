@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from textual_plotext import PlotextPlot
 
-from approve_watch.db import connect, daily_counts_all, hourly_counts_7d
+from approve_watch.db import (
+    connect,
+    hourly_counts_7d,
+    minute_counts_60m,
+    total_before,
+)
 
-HOURS = 7 * 24  # one week of hourly buckets
+HOURS = 7 * 24      # one week of hourly buckets (left chart)
+MINUTES = 60        # rolling cumulative window (right chart)
 
 
 def _hourly_series_7d(
@@ -35,12 +41,34 @@ def _hourly_series_7d(
 
 def _evenly_spaced(n: int, max_ticks: int = 6) -> list[int]:
     """Indices in [0, n-1] approximately evenly spaced. Used to pick a
-    handful of X-axis tick positions when the cumulative chart spans
-    many days."""
+    handful of X-axis tick positions on the rolling cumulative chart."""
     if n <= max_ticks:
         return list(range(n))
     step = (n - 1) / (max_ticks - 1)
     return [round(i * step) for i in range(max_ticks)]
+
+
+def _minute_series_60m(
+    points: list[tuple[str, int]],
+) -> tuple[list[int], list[int], list[datetime]]:
+    """Densify ``points`` (sparse minute buckets) into a contiguous 60-min
+    series ending at the current minute. Returns (x_indices, per-minute
+    counts, per-minute timestamps). The returned series always has length
+    ``MINUTES``, even when the DB has fewer rows — keeps the X-axis
+    width fixed so the chart visibly slides as time passes."""
+    counts: dict[str, int] = {b: n for b, n in points}
+    now = datetime.now().replace(second=0, microsecond=0)
+    x: list[int] = []
+    y: list[int] = []
+    stamps: list[datetime] = []
+    for i in range(MINUTES - 1, -1, -1):
+        t = now - timedelta(minutes=i)
+        bucket = t.strftime("%Y-%m-%d %H:%M")
+        idx = MINUTES - 1 - i
+        x.append(idx)
+        y.append(counts.get(bucket, 0))
+        stamps.append(t)
+    return x, y, stamps
 
 
 class TimelineChart(PlotextPlot):
@@ -66,31 +94,39 @@ class TimelineChart(PlotextPlot):
 
 
 class CumulativeChart(PlotextPlot):
-    """Cumulative approvals — monotonic line over the entire history.
-    One point per day; cumsum starts at zero on the first recorded day."""
+    """All-time cumulative approvals, viewed through a sliding 60-minute
+    window. The Y-axis is the running total of every approval ever
+    recorded (so the line never resets); the X-axis only shows the most
+    recent 60 minutes and slides forward each minute. Tick labels are
+    full ``HH:MM`` timestamps at evenly-spaced minute marks."""
 
     DEFAULT_CSS = "CumulativeChart { height: 100%; }"
 
     def refresh_data(self) -> None:
         with connect() as conn:
-            points = daily_counts_all(conn)
+            points = minute_counts_60m(conn)
+            # asked_at is stored as UTC ISO (see db.now_iso), so the
+            # cutoff has to be UTC too.
+            cutoff_dt = datetime.now(timezone.utc).replace(
+                second=0, microsecond=0
+            ) - timedelta(minutes=MINUTES)
+            baseline = total_before(conn, cutoff_dt.isoformat(timespec="microseconds"))
+        x, per_minute, stamps = _minute_series_60m(points)
+
+        running = baseline
+        cum: list[int] = []
+        for n in per_minute:
+            running += n
+            cum.append(running)
+
+        tick_idx = _evenly_spaced(len(stamps))
+        tick_lbl = [stamps[i].strftime("%H:%M") for i in tick_idx]
 
         plt = self.plt
         plt.clear_figure()
         plt.theme("pro")
-        plt.title("Cumulative approvals (all time)")
+        plt.plot(x, cum, marker="braille")
+        plt.xticks(tick_idx, tick_lbl)
+        plt.title("Cumulative approvals (all time, last 60 min view)")
         plt.ylabel("total")
-
-        if points:
-            running = 0
-            cum: list[int] = []
-            for _, n in points:
-                running += n
-                cum.append(running)
-            x = list(range(len(points)))
-            tick_idx = _evenly_spaced(len(points))
-            tick_lbl = [points[i][0][5:] for i in tick_idx]  # "MM-DD"
-            plt.plot(x, cum, marker="braille")
-            plt.xticks(tick_idx, tick_lbl)
-
         self.refresh()

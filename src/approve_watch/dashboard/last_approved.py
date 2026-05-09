@@ -2,17 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
 
 from approve_watch.db import connect, last_approved
 
 
 def _humanise(iso: str | None) -> str:
-    """Render an ISO timestamp as 'just now / Nm ago / hh:mm:ss'. Mirrors
-    the compactness of Dolphie's metric panels — readable at a glance
-    without taking up the whole row."""
+    """Render an ISO timestamp as 'just now / Nm ago / 2026-05-08 09:30'.
+    Mirrors the compactness of Dolphie's metric panels — readable at a
+    glance without taking up the whole row."""
     if not iso:
         return "—"
     try:
@@ -34,33 +32,11 @@ def _humanise(iso: str | None) -> str:
     return ts.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-class _Stat(Vertical):
-    """A single Dolphie-style label-over-value cell."""
-
-    DEFAULT_CSS = """
-    _Stat { width: auto; height: 3; padding: 0 2 0 0; }
-    _Stat .stat-label { color: $text-muted; text-style: bold; }
-    _Stat .stat-value { color: $text; }
-    """
-
-    def __init__(self, label: str, value: str, value_style: str = "") -> None:
-        super().__init__()
-        self._label = label
-        self._value = value
-        self._value_style = value_style
-
-    def compose(self) -> ComposeResult:
-        yield Static(self._label, classes="stat-label")
-        cls = "stat-value"
-        if self._value_style:
-            cls += f" {self._value_style}"
-        yield Static(self._value or "—", classes=cls)
-
-
-class LastApprovedPanel(Horizontal):
-    """Middle-row panel: most recent approved command + metadata, laid out
-    as side-by-side label/value cells. Repolls itself; tells the user at a
-    glance what just got auto-approved (or by them, manually)."""
+class LastApprovedPanel(Static):
+    """Middle-row panel: most recent approved command + metadata. A
+    single Static with Rich markup — earlier label/value cell layout
+    collapsed to zero width inside a Horizontal, leaving the panel
+    visually empty even though its widgets had mounted."""
 
     DEFAULT_CSS = """
     LastApprovedPanel {
@@ -69,23 +45,14 @@ class LastApprovedPanel(Horizontal):
         padding: 0 1;
         background: $boost;
     }
-    LastApprovedPanel.empty { border: round $surface; }
-    LastApprovedPanel .stat-cmd { color: $success; text-style: bold; }
-    LastApprovedPanel .stat-empty {
-        color: $text-muted; text-style: italic;
-        width: 100%; content-align: center middle;
-    }
+    LastApprovedPanel.empty { border: round $surface; color: $text-muted; }
     """
 
     BORDER_TITLE = "Last approved"
 
     def __init__(self) -> None:
-        super().__init__(id="last-approved")
+        super().__init__("loading…", id="last-approved", markup=True)
         self.border_title = self.BORDER_TITLE
-
-    def compose(self) -> ComposeResult:
-        # Filled in by refresh_data on mount.
-        yield Static("loading…", classes="stat-empty")
 
     def on_mount(self) -> None:
         self.refresh_data()
@@ -94,12 +61,9 @@ class LastApprovedPanel(Horizontal):
         with connect() as conn:
             row = last_approved(conn)
 
-        for child in list(self.children):
-            child.remove()
-
         if row is None:
             self.add_class("empty")
-            self.mount(Static("nothing approved yet", classes="stat-empty"))
+            self.update("[i]nothing approved yet[/i]")
             return
         self.remove_class("empty")
 
@@ -109,8 +73,10 @@ class LastApprovedPanel(Horizontal):
         source = row["source"] or "—"
         command = (row["command"] or "—").strip()
 
-        self.mount(_Stat("WHEN", when))
-        self.mount(_Stat("KIND", kind))
-        self.mount(_Stat("BY", decided_by))
-        self.mount(_Stat("SOURCE", source))
-        self.mount(_Stat("COMMAND", command, value_style="stat-cmd"))
+        self.update(
+            f"[b]WHEN[/b] {when}    "
+            f"[b]KIND[/b] {kind}    "
+            f"[b]BY[/b] {decided_by}    "
+            f"[b]SRC[/b] {source}\n"
+            f"[b]CMD[/b] [green b]{command}[/green b]"
+        )

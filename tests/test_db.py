@@ -3,14 +3,15 @@ from __future__ import annotations
 from approve_watch.db import (
     claim_decision,
     connect,
-    daily_counts_all,
     fetch_decision,
     hourly_counts_7d,
     insert_pending,
     last_approved,
     list_pending,
+    minute_counts_60m,
     pending_count,
     set_label,
+    total_before,
 )
 
 
@@ -86,19 +87,35 @@ def test_last_approved_returns_most_recent_approval(tmp_db) -> None:
         assert row["id"] == c
 
 
-def test_hourly_counts_7d_and_daily_counts_all(tmp_db) -> None:
+def test_hourly_counts_7d_and_minute_counts_60m(tmp_db) -> None:
     with connect(tmp_db) as conn:
         # Empty DB — both queries return empty.
         assert hourly_counts_7d(conn) == []
-        assert daily_counts_all(conn) == []
+        assert minute_counts_60m(conn) == []
 
         for cmd in ["a", "b", "c"]:
             insert_pending(conn, cmd, "tmux:s:0.0")
 
-        # All three rows fall in the same hour bucket and the same day
-        # bucket, so each query returns a single bucket of size 3.
+        # All three rows fall in the same hour bucket and the same
+        # minute bucket, so each query returns a single bucket of size 3.
         hours = hourly_counts_7d(conn)
-        days = daily_counts_all(conn)
+        minutes = minute_counts_60m(conn)
         assert sum(n for _, n in hours) == 3
-        assert len(days) == 1
-        assert days[0][1] == 3
+        assert len(minutes) == 1
+        assert minutes[0][1] == 3
+
+
+def test_total_before_seeds_cumulative_chart(tmp_db) -> None:
+    """The CumulativeChart needs an all-time count from before its
+    60-minute viewport so the visible line continues from history rather
+    than restarting at zero each time."""
+    with connect(tmp_db) as conn:
+        assert total_before(conn, "9999-01-01") == 0
+
+        for cmd in ["a", "b", "c"]:
+            insert_pending(conn, cmd, "tmux:s:0.0")
+
+        # All three rows are before any future timestamp.
+        assert total_before(conn, "9999-01-01") == 3
+        # None are before the unix epoch.
+        assert total_before(conn, "1970-01-01") == 0
