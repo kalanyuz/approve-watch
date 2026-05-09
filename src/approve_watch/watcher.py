@@ -4,17 +4,27 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from approve_watch.config import (
     DECISION_POLL_S,
     KIND_TIMEOUTS_S,
     POLL_INTERVAL_S,
+    RUNAWAY_THRESHOLD_PER_MIN,
+    RUNAWAY_WINDOW_MIN,
     Config,
     load_config,
 )
-from approve_watch.db import claim_decision, connect, fetch_decision, insert_pending
+from approve_watch.db import (
+    claim_decision,
+    connect,
+    fetch_decision,
+    insert_pending,
+    is_alarmed,
+    prompt_rate_per_minute,
+    set_alarm,
+)
 from approve_watch.detector import Detector
 from approve_watch.sources import make_source
 from approve_watch.sources.base import PaneId, PaneSource
@@ -46,9 +56,13 @@ async def _await_decision(
     db_path: Path | None,
     row_id: int,
     deadline: float,
+    default_decision_factory: Callable[[], tuple[int, str]] | None = None,
 ) -> tuple[int, str]:
-    """Wait until the row has a decision or the deadline elapses, then claim
-    auto-approval if we time out. Returns (approved, decided_by)."""
+    """Wait until the row has a decision or the deadline elapses, then
+    claim a default decision. ``default_decision_factory`` is called at
+    timeout-time so the caller can re-evaluate state (e.g. is the pane's
+    runaway alarm still set?) at the moment of decision rather than at
+    decision-await start. If omitted, defaults to (1, 'auto-watcher')."""
     while time.monotonic() < deadline:
         with connect(db_path) as conn:
             approved, decided_by = fetch_decision(conn, row_id)
@@ -56,9 +70,14 @@ async def _await_decision(
             return approved, decided_by
         await asyncio.sleep(DECISION_POLL_S)
 
+    default_approved, default_by = (
+        default_decision_factory() if default_decision_factory else (1, "auto-watcher")
+    )
     with connect(db_path) as conn:
-        if claim_decision(conn, row_id, approved=1, decided_by="auto-watcher"):
-            return 1, "auto-watcher"
+        if claim_decision(
+            conn, row_id, approved=default_approved, decided_by=default_by
+        ):
+            return default_approved, default_by
         approved, decided_by = fetch_decision(conn, row_id)
         assert approved is not None and decided_by is not None
         return approved, decided_by
@@ -83,14 +102,40 @@ async def _handle_pane(
     seen.add(m.signature)
     log.info("pane %s prompt detected (%s): %s", pane, m.kind, m.command)
 
+    pane_source = f"{source.name}:{pane}"
     with connect(db_path) as conn:
         row_id = insert_pending(
-            conn, command=m.command, source=f"{source.name}:{pane}", kind=m.kind
+            conn, command=m.command, source=pane_source, kind=m.kind
         )
+        # Trip the alarm if this pane is firing too fast. The DB query
+        # already counts the row we just inserted, which is what we want
+        # — the rate snapshot is "as of this prompt".
+        rate = prompt_rate_per_minute(
+            conn, pane_source, window_minutes=RUNAWAY_WINDOW_MIN
+        )
+        if rate >= RUNAWAY_THRESHOLD_PER_MIN:
+            set_alarm(conn, pane_source, rate)
+            log.warning(
+                "runaway-loop alarm: pane=%s rate=%.1f/min — auto-decision "
+                "flips to reject until cleared",
+                pane_source,
+                rate,
+            )
+
+    def default_decision() -> tuple[int, str]:
+        # Re-check the alarm at timeout-time so a mid-await dismissal
+        # from the dashboard immediately resumes auto-approval.
+        with connect(db_path) as conn:
+            if is_alarmed(conn, pane_source):
+                return 0, "auto-watcher-alarmed"
+        return 1, "auto-watcher"
 
     timeout = (timeouts or KIND_TIMEOUTS_S).get(m.kind, KIND_TIMEOUTS_S[m.kind])
     approved, decided_by = await _await_decision(
-        db_path, row_id, deadline=time.monotonic() + timeout
+        db_path,
+        row_id,
+        deadline=time.monotonic() + timeout,
+        default_decision_factory=default_decision,
     )
     log.info(
         "row %s decided: approved=%s by=%s -> sending keystroke",

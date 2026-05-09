@@ -12,7 +12,7 @@ from approve_watch.config import (
     OTHER_PROMPT_REGEX,
     SHELL_COMMAND_REGEX,
 )
-from approve_watch.db import claim_decision, connect, recent
+from approve_watch.db import claim_decision, connect, recent, set_alarm
 from approve_watch.detector import Detector
 from approve_watch.sources.base import PaneId
 from approve_watch.watcher import _SignatureCache, _handle_pane, watch_loop
@@ -241,3 +241,60 @@ async def test_signature_retired_after_prompt_clears(tmp_db: Path) -> None:
     m = detector.match(SHELL_PROMPT)
     assert m is not None
     assert m.signature not in seen
+
+
+async def test_alarmed_pane_auto_rejects_at_timeout(tmp_db: Path) -> None:
+    """When a pane is marked as alarmed, the watcher's timeout-default
+    flips from approve to reject so a runaway agent gets `n`'d back."""
+    src = FakeSource(["s:0.0"])
+    seen = _SignatureCache()
+
+    # Pre-arm the alarm so the very first prompt is rejected.
+    with connect(tmp_db) as conn:
+        set_alarm(conn, "tmux:s:0.0", rate_per_min=20.0)
+
+    await _handle_pane(
+        src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
+
+    assert src.sent == [("s:0.0", "n")], "alarmed pane should send n, not y"
+    with connect(tmp_db) as conn:
+        rows = recent(conn)
+    assert len(rows) == 1
+    assert rows[0]["approved"] == 0
+    assert rows[0]["decided_by"] == "auto-watcher-alarmed"
+
+
+async def test_runaway_loop_trips_alarm_inline(tmp_db: Path, monkeypatch) -> None:
+    """A burst of prompts on the same pane within the runaway window must
+    set an alarm row so subsequent prompts auto-reject."""
+    from approve_watch import config as cfg
+    from approve_watch.db import is_alarmed
+
+    # Tighten the threshold so two pre-existing rows are enough.
+    monkeypatch.setattr(cfg, "RUNAWAY_THRESHOLD_PER_MIN", 1.0)
+    import approve_watch.watcher as w
+    monkeypatch.setattr(w, "RUNAWAY_THRESHOLD_PER_MIN", 1.0)
+
+    # Seed the DB with prior rows on the target pane so the in-window
+    # rate already exceeds threshold.
+    with connect(tmp_db) as conn:
+        for _ in range(5):
+            conn.execute(
+                "INSERT INTO approvals (asked_at, command, source, kind) "
+                "VALUES (datetime('now'), 'x', 'tmux:s:0.0', 'shell_command')"
+            )
+
+    src = FakeSource(["s:0.0"])
+    seen = _SignatureCache()
+    await _handle_pane(
+        src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
+
+    with connect(tmp_db) as conn:
+        assert is_alarmed(conn, "tmux:s:0.0") is True
+    # And because the alarm was set during this very call, the default
+    # decision factory ran with alarmed=True → n was sent.
+    assert src.sent == [("s:0.0", "n")]

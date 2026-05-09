@@ -22,6 +22,12 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_asked_at ON approvals(asked_at);
 CREATE INDEX IF NOT EXISTS idx_approvals_pending  ON approvals(approved) WHERE approved IS NULL;
+
+CREATE TABLE IF NOT EXISTS pane_alarms (
+  pane          TEXT PRIMARY KEY,
+  alarmed_at    TEXT NOT NULL,
+  rate_per_min  REAL NOT NULL
+);
 """
 
 
@@ -181,6 +187,57 @@ def last_approved(conn: sqlite3.Connection) -> sqlite3.Row | None:
         LIMIT 1
         """
     ).fetchone()
+
+
+def prompt_rate_per_minute(
+    conn: sqlite3.Connection, pane: str, window_minutes: int
+) -> float:
+    """Average prompts-per-minute on ``pane`` over the last ``window_minutes``.
+    Used by the runaway-loop alarm: a rate sustained above some threshold
+    is the signal that an agent is stuck retrying the same gate."""
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS n FROM approvals
+        WHERE source = ?
+          AND asked_at >= datetime('now', '-{int(window_minutes)} minutes')
+        """,
+        (pane,),
+    ).fetchone()
+    return float(row["n"]) / max(window_minutes, 1)
+
+
+def set_alarm(conn: sqlite3.Connection, pane: str, rate_per_min: float) -> None:
+    conn.execute(
+        """
+        INSERT INTO pane_alarms (pane, alarmed_at, rate_per_min)
+        VALUES (?, ?, ?)
+        ON CONFLICT(pane) DO UPDATE SET
+          alarmed_at = excluded.alarmed_at,
+          rate_per_min = excluded.rate_per_min
+        """,
+        (pane, now_iso(), rate_per_min),
+    )
+
+
+def clear_alarm(conn: sqlite3.Connection, pane: str | None = None) -> int:
+    """Clear one alarm, or all alarms if ``pane`` is None. Returns the
+    number of rows removed."""
+    if pane is None:
+        return conn.execute("DELETE FROM pane_alarms").rowcount
+    return conn.execute("DELETE FROM pane_alarms WHERE pane = ?", (pane,)).rowcount
+
+
+def is_alarmed(conn: sqlite3.Connection, pane: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM pane_alarms WHERE pane = ?", (pane,)
+    ).fetchone()
+    return row is not None
+
+
+def list_alarms(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM pane_alarms ORDER BY alarmed_at DESC"
+    ).fetchall()
 
 
 def recent_approved(

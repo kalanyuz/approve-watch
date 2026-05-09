@@ -2,15 +2,20 @@ from __future__ import annotations
 
 from approve_watch.db import (
     claim_decision,
+    clear_alarm,
     connect,
     fetch_decision,
     hourly_counts_7d,
     insert_pending,
+    is_alarmed,
     last_approved,
+    list_alarms,
     list_pending,
     minute_counts_60m,
     pending_count,
+    prompt_rate_per_minute,
     recent_approved,
+    set_alarm,
     set_label,
     total_before,
 )
@@ -144,3 +149,53 @@ def test_total_before_seeds_cumulative_chart(tmp_db) -> None:
         assert total_before(conn, "9999-01-01") == 3
         # None are before the unix epoch.
         assert total_before(conn, "1970-01-01") == 0
+
+
+def test_pane_alarm_set_clear_check(tmp_db) -> None:
+    """Per-pane alarm state for the runaway-loop detector."""
+    with connect(tmp_db) as conn:
+        assert is_alarmed(conn, "tmux:s:0.0") is False
+        assert list_alarms(conn) == []
+
+        set_alarm(conn, "tmux:s:0.0", rate_per_min=12.5)
+        assert is_alarmed(conn, "tmux:s:0.0") is True
+        assert is_alarmed(conn, "tmux:other:0.0") is False
+        rows = list_alarms(conn)
+        assert len(rows) == 1
+        assert rows[0]["pane"] == "tmux:s:0.0"
+        assert rows[0]["rate_per_min"] == 12.5
+
+        # Re-setting on the same pane updates the rate (UPSERT).
+        set_alarm(conn, "tmux:s:0.0", rate_per_min=20.0)
+        rows = list_alarms(conn)
+        assert len(rows) == 1
+        assert rows[0]["rate_per_min"] == 20.0
+
+        # Targeted clear.
+        assert clear_alarm(conn, "tmux:s:0.0") == 1
+        assert is_alarmed(conn, "tmux:s:0.0") is False
+
+        # Bulk clear.
+        set_alarm(conn, "tmux:a:0.0", 11.0)
+        set_alarm(conn, "tmux:b:0.0", 13.0)
+        assert clear_alarm(conn) == 2
+        assert list_alarms(conn) == []
+
+
+def test_prompt_rate_per_minute_counts_only_target_pane(tmp_db) -> None:
+    """The runaway alarm fires per-pane; the rate query must scope by source."""
+    with connect(tmp_db) as conn:
+        # Empty DB.
+        assert prompt_rate_per_minute(conn, "tmux:s:0.0", window_minutes=2) == 0.0
+
+        # 8 prompts on s:0.0 within the last 2 minutes → 4/min.
+        for _ in range(8):
+            insert_pending(conn, "cmd", "tmux:s:0.0")
+        # 2 prompts on a different pane in the same window — must not
+        # count toward s:0.0's rate.
+        for _ in range(2):
+            insert_pending(conn, "cmd", "tmux:other:0.0")
+
+        assert prompt_rate_per_minute(conn, "tmux:s:0.0", window_minutes=2) == 4.0
+        assert prompt_rate_per_minute(conn, "tmux:other:0.0", window_minutes=2) == 1.0
+        assert prompt_rate_per_minute(conn, "tmux:nope:0.0", window_minutes=2) == 0.0

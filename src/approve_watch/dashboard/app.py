@@ -5,7 +5,14 @@ from textual.binding import Binding
 from textual.containers import Horizontal, HorizontalScroll, Vertical
 from textual.widgets import Footer, Header, Static, TabbedContent, TabPane
 
-from approve_watch.db import connect, list_pending, pending_count, total_today
+from approve_watch.db import (
+    clear_alarm,
+    connect,
+    list_alarms,
+    list_pending,
+    pending_count,
+    total_today,
+)
 from approve_watch.dashboard.cards import ApprovalCard
 from approve_watch.dashboard.charts import CumulativeChart, TimelineChart
 from approve_watch.dashboard.labels import LabelPane
@@ -24,6 +31,14 @@ class ApproveWatchApp(App[None]):
     #root { height: 100%; }
 
     #status-bar { height: 1; padding: 0 1; background: $boost; }
+    #alarm-bar {
+        height: auto;
+        padding: 0 1;
+        background: $error;
+        color: $text;
+        text-style: bold;
+    }
+    #alarm-bar.empty { display: none; }
 
     #charts-tabs { height: 2fr; padding: 0 1; }
     #charts-tabs Tabs { background: $surface; }
@@ -47,17 +62,21 @@ class ApproveWatchApp(App[None]):
         Binding("1", "show_tab('cum')", "Cumulative"),
         Binding("2", "show_tab('timeline')", "7d"),
         Binding("3", "show_tab('recent')", "Recent"),
+        Binding("p", "clear_alarms", "Clear alarm"),
     ]
 
     POLL_PENDING_S = 0.2
     REFRESH_CHARTS_S = 5.0
     REFRESH_RECENT_S = 2.0
+    REFRESH_ALARM_S = 1.0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Vertical(id="root"):
             self._status = Static("loading…", id="status-bar")
             yield self._status
+            self._alarm = Static("", id="alarm-bar", markup=True, classes="empty")
+            yield self._alarm
 
             self._timeline = TimelineChart()
             self._cumulative = CumulativeChart()
@@ -85,10 +104,28 @@ class ApproveWatchApp(App[None]):
         self._refresh_charts()
         self._refresh_recent()
         self._refresh_status()
+        self._refresh_alarms()
         self.set_interval(self.POLL_PENDING_S, self._poll_pending)
         self.set_interval(self.REFRESH_CHARTS_S, self._refresh_charts)
         self.set_interval(self.REFRESH_RECENT_S, self._refresh_recent)
+        self.set_interval(self.REFRESH_ALARM_S, self._refresh_alarms)
         self.set_interval(1.0, self._refresh_status)
+
+    def _refresh_alarms(self) -> None:
+        with connect() as conn:
+            alarms = list_alarms(conn)
+        if not alarms:
+            self._alarm.update("")
+            self._alarm.add_class("empty")
+            return
+        self._alarm.remove_class("empty")
+        parts = [
+            f"⚠  RUNAWAY-LOOP ALARM — auto-decisions on these panes are "
+            f"flipped to REJECT until cleared (press [b]p[/b] to clear):"
+        ]
+        for a in alarms:
+            parts.append(f"  • {a['pane']}  ({a['rate_per_min']:.1f}/min)")
+        self._alarm.update("\n".join(parts))
 
     def _refresh_charts(self) -> None:
         self._timeline.refresh_data()
@@ -135,6 +172,11 @@ class ApproveWatchApp(App[None]):
     def action_show_tab(self, tab_id: str) -> None:
         self.query_one("#charts-tabs", TabbedContent).active = tab_id
 
+    def action_clear_alarms(self) -> None:
+        with connect() as conn:
+            clear_alarm(conn)
+        self._refresh_alarms()
+
     def action_toggle_labels(self) -> None:
         self._labels.toggle()
 
@@ -142,3 +184,4 @@ class ApproveWatchApp(App[None]):
         self._refresh_charts()
         self._refresh_recent()
         self._refresh_status()
+        self._refresh_alarms()
