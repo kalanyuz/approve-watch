@@ -10,6 +10,7 @@ from approve_watch.db import (
     list_pending,
     minute_counts_60m,
     pending_count,
+    recent_approved,
     set_label,
     total_before,
 )
@@ -57,7 +58,6 @@ def test_set_label(tmp_db) -> None:
 
 
 def test_last_approved_returns_most_recent_approval(tmp_db) -> None:
-    """Drives the dashboard's middle-row 'last approved' panel."""
     with connect(tmp_db) as conn:
         # No approvals yet.
         assert last_approved(conn) is None
@@ -85,6 +85,31 @@ def test_last_approved_returns_most_recent_approval(tmp_db) -> None:
         row = last_approved(conn)
         assert row is not None
         assert row["id"] == c
+
+
+def test_recent_approved_orders_by_decided_at_desc(tmp_db) -> None:
+    """Drives the 'Recent approvals' tab's tabular view."""
+    with connect(tmp_db) as conn:
+        # Empty DB.
+        assert recent_approved(conn) == []
+
+        a = insert_pending(conn, "ls", "tmux:s:0.0")
+        b = insert_pending(conn, "pwd", "tmux:s:0.0")
+        c = insert_pending(conn, "rm -rf /tmp/x", "tmux:s:0.0", kind="other")
+        d = insert_pending(conn, "still-pending", "tmux:s:0.0")
+
+        # a, then c, then b — but rejecting one should exclude it.
+        claim_decision(conn, a, approved=1, decided_by="user")
+        claim_decision(conn, c, approved=0, decided_by="user")  # rejected
+        claim_decision(conn, b, approved=1, decided_by="auto-watcher")
+
+        rows = recent_approved(conn)
+        # `b` decided last → first; `a` decided first → second; `c` and
+        # `d` excluded (rejected / still pending).
+        assert [r["id"] for r in rows] == [b, a]
+
+        # Limit honours the smaller bound.
+        assert len(recent_approved(conn, limit=1)) == 1
 
 
 def test_hourly_counts_7d_and_minute_counts_60m(tmp_db) -> None:

@@ -172,8 +172,7 @@ def daily_counts_all(conn: sqlite3.Connection) -> list[tuple[str, int]]:
 
 
 def last_approved(conn: sqlite3.Connection) -> sqlite3.Row | None:
-    """Most recent row that resolved as approved (1). Drives the
-    'last approved' middle-row panel."""
+    """Most recent row that resolved as approved (1)."""
     return conn.execute(
         """
         SELECT * FROM approvals
@@ -182,6 +181,22 @@ def last_approved(conn: sqlite3.Connection) -> sqlite3.Row | None:
         LIMIT 1
         """
     ).fetchone()
+
+
+def recent_approved(
+    conn: sqlite3.Connection, limit: int = 100
+) -> list[sqlite3.Row]:
+    """Most recently approved rows, newest first. Drives the
+    'Recent approvals' tab (tabular view)."""
+    return conn.execute(
+        """
+        SELECT * FROM approvals
+        WHERE approved = 1 AND decided_at IS NOT NULL
+        ORDER BY decided_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
 
 
 def daily_counts_30d(conn: sqlite3.Connection) -> list[tuple[str, int]]:
