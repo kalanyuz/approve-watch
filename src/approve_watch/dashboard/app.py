@@ -25,12 +25,15 @@ class ApproveWatchApp(App[None]):
 
     #status-bar { height: 1; padding: 0 1; background: $boost; }
 
-    #charts-tabs { height: 65%; padding: 0 1; }
-    #charts-tabs ContentSwitcher { height: 1fr; }
-    #charts-tabs TabbedContent { height: 100%; }
+    #charts-tabs { height: 2fr; padding: 0 1; }
     #charts-tabs Tabs { background: $surface; }
+    /* TabPane defaults to natural-height inside ContentSwitcher, which
+       collapses to 0 when its child uses a percentage height. Force it
+       to fill so the active chart / table is visible. */
+    #charts-tabs TabPane { height: 1fr; padding: 0; }
+    #charts-tabs TabPane > * { height: 1fr; }
 
-    #queue-row { height: 35%; border-top: solid $primary; }
+    #queue-row { height: 1fr; min-height: 12; border-top: solid $primary; }
     #queue-label { width: 18; padding: 1 1; color: $text-muted; }
     #queue { height: 100%; }
 
