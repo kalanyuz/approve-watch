@@ -241,3 +241,31 @@ async def test_signature_retired_after_prompt_clears(tmp_db: Path) -> None:
     m = detector.match(SHELL_PROMPT)
     assert m is not None
     assert m.signature not in seen
+
+
+async def test_flight_recorder_captures_context(tmp_db: Path) -> None:
+    """The watcher persists the matched prompt block plus a few
+    surrounding lines from the pane buffer at decision time."""
+    pane_buffer = (
+        "$ ls -la\n"
+        "drwxr-xr-x  3 user user  4096 May  9 09:00 .\n"
+        "drwxr-xr-x 12 user user  4096 May  9 08:00 ..\n"
+        "$ git diff --cached\n"
+        "[diff output…]\n"
+        + SHELL_PROMPT
+        + "$ \n"
+    )
+    src = FakeSource(["s:0.0"])
+    src._buffers["s:0.0"] = pane_buffer
+    seen = _SignatureCache()
+    await _handle_pane(
+        src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
+    with connect(tmp_db) as conn:
+        rows = recent(conn)
+    assert len(rows) == 1
+    ctx = rows[0]["context"]
+    assert ctx is not None
+    assert "Run this command?" in ctx, "matched block missing from context"
+    assert "git diff --cached" in ctx, "pre-context missing"

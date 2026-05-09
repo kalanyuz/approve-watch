@@ -18,6 +18,7 @@ class Match:
     command: str
     signature: str  # stable hash of the prompt block, used to deduplicate triggers
     kind: str       # KIND_SHELL or KIND_OTHER
+    block: str      # full matched text (regex group 0); fed to the flight recorder
 
 
 class Detector:
@@ -47,4 +48,4 @@ class Detector:
             command = m.group(0).strip().splitlines()[-1]
         block = m.group(0)
         sig = hashlib.sha256(block.encode("utf-8", errors="replace")).hexdigest()[:16]
-        return Match(command=command, signature=sig, kind=kind)
+        return Match(command=command, signature=sig, kind=kind, block=block)

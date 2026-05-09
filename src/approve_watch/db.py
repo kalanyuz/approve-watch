@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS approvals (
   approved    INTEGER,
   decided_at  TEXT,
   decided_by  TEXT,
-  label       TEXT
+  label       TEXT,
+  context     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_asked_at ON approvals(asked_at);
 CREATE INDEX IF NOT EXISTS idx_approvals_pending  ON approvals(approved) WHERE approved IS NULL;
@@ -34,12 +35,14 @@ def init_db(path: Path | None = None) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(p) as conn:
         conn.executescript(SCHEMA)
-        # Lightweight forward migration for DBs created before `kind` existed.
+        # Lightweight forward migration for older DBs.
         cols = {row[1] for row in conn.execute("PRAGMA table_info(approvals)")}
         if "kind" not in cols:
             conn.execute(
                 "ALTER TABLE approvals ADD COLUMN kind TEXT NOT NULL DEFAULT 'shell_command'"
             )
+        if "context" not in cols:
+            conn.execute("ALTER TABLE approvals ADD COLUMN context TEXT")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
     return p
@@ -60,15 +63,27 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def insert_pending(
-    conn: sqlite3.Connection, command: str, source: str, kind: str = "shell_command"
+    conn: sqlite3.Connection,
+    command: str,
+    source: str,
+    kind: str = "shell_command",
+    context: str | None = None,
 ) -> int:
     cur = conn.execute(
-        "INSERT INTO approvals (asked_at, command, source, kind) VALUES (?, ?, ?, ?)",
-        (now_iso(), command, source, kind),
+        "INSERT INTO approvals (asked_at, command, source, kind, context) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (now_iso(), command, source, kind, context),
     )
     rid = cur.lastrowid
     assert rid is not None
     return rid
+
+
+def get_row(conn: sqlite3.Connection, row_id: int) -> sqlite3.Row | None:
+    """Fetch one row by id. Drives the ``approve-watch show <id>`` CLI."""
+    return conn.execute(
+        "SELECT * FROM approvals WHERE id = ?", (row_id,)
+    ).fetchone()
 
 
 def fetch_decision(conn: sqlite3.Connection, row_id: int) -> tuple[int | None, str | None]:
