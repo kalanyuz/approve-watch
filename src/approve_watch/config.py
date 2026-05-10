@@ -97,6 +97,14 @@ KIND_DASHBOARD_TIMEOUTS_S: dict[str, float] = {
 POLL_INTERVAL_S = 0.2
 DECISION_POLL_S = 0.1
 
+# Runaway-loop alarm: when a single pane's prompt rate exceeds
+# RUNAWAY_THRESHOLD_PER_MIN averaged across the last RUNAWAY_WINDOW_MIN
+# minutes, the watcher flips to auto-rejecting on that pane until the
+# user dismisses the alarm. Catches "agent stuck in a retry loop"
+# situations early, before they spend significant compute.
+RUNAWAY_THRESHOLD_PER_MIN = 10.0
+RUNAWAY_WINDOW_MIN = 2
+
 # Backwards-compat aliases used by older test code.
 WATCHER_TIMEOUT_S = KIND_TIMEOUTS_S[KIND_SHELL]
 DASHBOARD_TIMEOUT_S = KIND_DASHBOARD_TIMEOUTS_S[KIND_SHELL]
