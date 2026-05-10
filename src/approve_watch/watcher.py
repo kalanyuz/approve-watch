@@ -25,11 +25,38 @@ from approve_watch.db import (
     prompt_rate_per_minute,
     set_alarm,
 )
-from approve_watch.detector import Detector
+from approve_watch.detector import Detector, strip_ansi
 from approve_watch.sources import make_source
 from approve_watch.sources.base import PaneId, PaneSource
 
 log = logging.getLogger("approve_watch.watcher")
+
+# Flight recorder: how many lines of pane context to store on either side
+# of the matched prompt block. Plenty to reconstruct what cursor-agent was
+# trying to do, small enough that 256 LRU rows × ~2 KB stays under 1 MB.
+CONTEXT_LINES_BEFORE = 12
+CONTEXT_LINES_AFTER = 4
+CONTEXT_MAX_BYTES = 8192
+
+
+def _capture_context(raw: str, matched_block: str) -> str:
+    """Return the matched prompt block plus a few surrounding lines from
+    the captured pane buffer, capped at CONTEXT_MAX_BYTES so stuck-flush
+    pane buffers can't bloat the DB. ``raw`` is post-strip_ansi text from
+    the detector; ``matched_block`` is the full text of the regex match
+    (m.group(0))."""
+    if not matched_block:
+        return raw[-CONTEXT_MAX_BYTES:]
+    idx = raw.find(matched_block)
+    if idx < 0:
+        return matched_block[:CONTEXT_MAX_BYTES]
+    pre = raw[:idx].splitlines()[-CONTEXT_LINES_BEFORE:]
+    post_start = idx + len(matched_block)
+    post = raw[post_start:].splitlines()[:CONTEXT_LINES_AFTER]
+    body = "\n".join([*pre, matched_block.rstrip("\n"), *post])
+    if len(body) > CONTEXT_MAX_BYTES:
+        body = body[-CONTEXT_MAX_BYTES:]
+    return body
 
 
 class _SignatureCache:
@@ -103,9 +130,14 @@ async def _handle_pane(
     log.info("pane %s prompt detected (%s): %s", pane, m.kind, m.command)
 
     pane_source = f"{source.name}:{pane}"
+    context = _capture_context(strip_ansi(raw), m.block)
     with connect(db_path) as conn:
         row_id = insert_pending(
-            conn, command=m.command, source=pane_source, kind=m.kind
+            conn,
+            command=m.command,
+            source=pane_source,
+            kind=m.kind,
+            context=context,
         )
         # Trip the alarm if this pane is firing too fast. The DB query
         # already counts the row we just inserted, which is what we want
@@ -235,8 +267,13 @@ async def watch_loop(
 def run(config: Config | None = None) -> None:
     cfg = config or load_config()
     source = make_source(cfg.source)
-    detector = Detector(cfg.shell_regex, cfg.other_regex)
+    detector = Detector(
+        cfg.shell_regex, cfg.other_regex, cfg.dangerous_patterns
+    )
     log.info(
-        "watcher starting: source=%s, timeouts=%s", source.name, cfg.timeouts
+        "watcher starting: source=%s, timeouts=%s, dangerous_patterns=%d",
+        source.name,
+        cfg.timeouts,
+        len(cfg.dangerous_patterns),
     )
     asyncio.run(watch_loop(source, detector, timeouts=cfg.timeouts))

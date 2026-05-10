@@ -4,7 +4,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-from approve_watch.config import KIND_OTHER, KIND_SHELL
+from approve_watch.config import KIND_DANGEROUS, KIND_OTHER, KIND_SHELL
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
 
@@ -18,16 +18,28 @@ class Match:
     command: str
     signature: str  # stable hash of the prompt block, used to deduplicate triggers
     kind: str       # KIND_SHELL or KIND_OTHER
+    block: str      # full matched text (regex group 0); fed to the flight recorder
 
 
 class Detector:
-    """Two-tier detector. Tries the shell-command regex first; on no match,
-    tries the generic "any TUI confirmation" regex. The kind on the returned
-    Match drives the watcher's per-prompt timeout."""
+    """Three-tier detector. Tries the shell-command regex first; on no
+    match, tries the generic "any TUI confirmation" regex. After either
+    matches, the captured command is scanned against ``dangerous_patterns``
+    — any hit re-tags the row as ``dangerous``, which the watcher treats
+    as effectively manual-only (24h timeout). The kind on the returned
+    Match drives all per-prompt timeout choices."""
 
-    def __init__(self, shell_pattern: str, other_pattern: str) -> None:
+    def __init__(
+        self,
+        shell_pattern: str,
+        other_pattern: str,
+        dangerous_patterns: list[str] | None = None,
+    ) -> None:
         self._shell = re.compile(shell_pattern)
         self._other = re.compile(other_pattern)
+        self._dangerous = [
+            re.compile(p, re.IGNORECASE) for p in (dangerous_patterns or [])
+        ]
 
     def match(self, raw: str) -> Match | None:
         text = strip_ansi(raw)
@@ -39,12 +51,17 @@ class Detector:
             return self._build(m, kind=KIND_OTHER)
         return None
 
-    @staticmethod
-    def _build(m: re.Match[str], kind: str) -> Match:
+    def _is_dangerous(self, command: str) -> bool:
+        return any(p.search(command) for p in self._dangerous)
+
+    def _build(self, m: re.Match[str], kind: str) -> Match:
         try:
             command = m.group("command").strip()
         except IndexError:
             command = m.group(0).strip().splitlines()[-1]
+        # Dangerous heuristics override the base tier.
+        if self._is_dangerous(command):
+            kind = KIND_DANGEROUS
         block = m.group(0)
         sig = hashlib.sha256(block.encode("utf-8", errors="replace")).hexdigest()[:16]
-        return Match(command=command, signature=sig, kind=kind)
+        return Match(command=command, signature=sig, kind=kind, block=block)

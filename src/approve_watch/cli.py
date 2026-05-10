@@ -6,7 +6,7 @@ import sys
 import click
 
 from approve_watch.config import db_path, load_config
-from approve_watch.db import init_db
+from approve_watch.db import connect, get_row, init_db
 
 
 @click.group()
@@ -59,6 +59,31 @@ def dash_cmd() -> None:
 def path_cmd() -> None:
     """Print the database path."""
     click.echo(str(db_path()))
+
+
+@main.command("show")
+@click.argument("row_id", type=int)
+def show_cmd(row_id: int) -> None:
+    """Print one approval row plus its captured pane context (flight recorder).
+
+    Use this to investigate why a row was approved/rejected — the
+    `context` column holds the matched prompt block plus a few lines of
+    surrounding pane output as captured at decision time.
+    """
+    with connect() as conn:
+        row = get_row(conn, row_id)
+    if row is None:
+        click.echo(f"no row {row_id}", err=True)
+        sys.exit(1)
+    keys = row.keys()
+    width = max(len(k) for k in keys if k != "context")
+    for k in keys:
+        if k == "context":
+            continue
+        click.echo(f"{k.ljust(width)}  {row[k]}")
+    click.echo("")
+    click.echo("--- captured pane context ---")
+    click.echo(row["context"] if "context" in keys and row["context"] else "(none)")
 
 
 if __name__ == "__main__":  # pragma: no cover
