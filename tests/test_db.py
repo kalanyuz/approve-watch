@@ -3,6 +3,7 @@ from __future__ import annotations
 from approve_watch.db import (
     claim_decision,
     connect,
+    daily_counts_since,
     fetch_decision,
     get_row,
     hourly_counts_7d,
@@ -163,3 +164,28 @@ def test_insert_pending_stores_context(tmp_db) -> None:
 def test_get_row_returns_none_for_missing(tmp_db) -> None:
     with connect(tmp_db) as conn:
         assert get_row(conn, 999) is None
+
+
+def test_daily_counts_since_window_and_grouping(tmp_db) -> None:
+    """Drives the 365-day heatmap. Counts within the window are bucketed
+    by day; rows older than the window are excluded."""
+    with connect(tmp_db) as conn:
+        # Empty.
+        assert daily_counts_since(conn, 365) == []
+
+        # Three rows today, one row "long ago" (manually backdated).
+        for _ in range(3):
+            insert_pending(conn, "x", "tmux:s:0.0")
+        conn.execute(
+            "INSERT INTO approvals (asked_at, command, source, kind) "
+            "VALUES (datetime('now', '-2 years'), 'old', 'tmux:s:0.0', 'shell_command')"
+        )
+
+        # 365-day window excludes the 2-year-old row.
+        rows_year = daily_counts_since(conn, 365)
+        assert sum(n for _, n in rows_year) == 3
+        assert len(rows_year) == 1  # all three of today fall in one bucket
+
+        # 30-day window same behavior here.
+        rows_month = daily_counts_since(conn, 30)
+        assert sum(n for _, n in rows_month) == 3

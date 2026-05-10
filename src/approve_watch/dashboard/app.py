@@ -8,6 +8,7 @@ from textual.widgets import Footer, Header, Static, TabbedContent, TabPane
 from approve_watch.db import connect, list_pending, pending_count, total_today
 from approve_watch.dashboard.cards import ApprovalCard
 from approve_watch.dashboard.charts import CumulativeChart, TimelineChart
+from approve_watch.dashboard.heatmap import HeatmapView
 from approve_watch.dashboard.labels import LabelPane
 from approve_watch.dashboard.recent_approved import RecentApprovedTable
 
@@ -25,12 +26,15 @@ class ApproveWatchApp(App[None]):
 
     #status-bar { height: 1; padding: 0 1; background: $boost; }
 
-    #charts-tabs { height: 65%; padding: 0 1; }
-    #charts-tabs ContentSwitcher { height: 1fr; }
-    #charts-tabs TabbedContent { height: 100%; }
+    #charts-tabs { height: 2fr; padding: 0 1; }
     #charts-tabs Tabs { background: $surface; }
+    /* TabPane defaults to natural-height inside ContentSwitcher, which
+       collapses to 0 when its child uses a percentage height. Force it
+       to fill so the active chart / table is visible. */
+    #charts-tabs TabPane { height: 1fr; padding: 0; }
+    #charts-tabs TabPane > * { height: 1fr; }
 
-    #queue-row { height: 35%; border-top: solid $primary; }
+    #queue-row { height: 1fr; min-height: 12; border-top: solid $primary; }
     #queue-label { width: 18; padding: 1 1; color: $text-muted; }
     #queue { height: 100%; }
 
@@ -44,6 +48,7 @@ class ApproveWatchApp(App[None]):
         Binding("1", "show_tab('cum')", "Cumulative"),
         Binding("2", "show_tab('timeline')", "7d"),
         Binding("3", "show_tab('recent')", "Recent"),
+        Binding("4", "show_tab('heatmap')", "Heatmap"),
     ]
 
     POLL_PENDING_S = 0.2
@@ -59,6 +64,7 @@ class ApproveWatchApp(App[None]):
             self._timeline = TimelineChart()
             self._cumulative = CumulativeChart()
             self._recent = RecentApprovedTable()
+            self._heatmap = HeatmapView()
 
             with TabbedContent(initial="cum", id="charts-tabs"):
                 with TabPane("Cumulative", id="cum"):
@@ -67,6 +73,8 @@ class ApproveWatchApp(App[None]):
                     yield self._timeline
                 with TabPane("Recent approvals", id="recent"):
                     yield self._recent
+                with TabPane("Heatmap (365d)", id="heatmap"):
+                    yield self._heatmap
 
             with Horizontal(id="queue-row"):
                 yield Static("Pending →", id="queue-label")
@@ -90,6 +98,7 @@ class ApproveWatchApp(App[None]):
     def _refresh_charts(self) -> None:
         self._timeline.refresh_data()
         self._cumulative.refresh_data()
+        self._heatmap.refresh_data()
 
     def _refresh_recent(self) -> None:
         self._recent.refresh_data()
