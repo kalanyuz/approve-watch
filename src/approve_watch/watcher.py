@@ -222,8 +222,13 @@ async def watch_loop(
 def run(config: Config | None = None) -> None:
     cfg = config or load_config()
     source = make_source(cfg.source)
-    detector = Detector(cfg.shell_regex, cfg.other_regex)
+    detector = Detector(
+        cfg.shell_regex, cfg.other_regex, cfg.dangerous_patterns
+    )
     log.info(
-        "watcher starting: source=%s, timeouts=%s", source.name, cfg.timeouts
+        "watcher starting: source=%s, timeouts=%s, dangerous_patterns=%d",
+        source.name,
+        cfg.timeouts,
+        len(cfg.dangerous_patterns),
     )
     asyncio.run(watch_loop(source, detector, timeouts=cfg.timeouts))
