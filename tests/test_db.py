@@ -5,6 +5,7 @@ from approve_watch.db import (
     connect,
     daily_counts_since,
     fetch_decision,
+    get_row,
     hourly_counts_7d,
     insert_pending,
     last_approved,
@@ -145,6 +146,24 @@ def test_total_before_seeds_cumulative_chart(tmp_db) -> None:
         assert total_before(conn, "9999-01-01") == 3
         # None are before the unix epoch.
         assert total_before(conn, "1970-01-01") == 0
+
+
+def test_insert_pending_stores_context(tmp_db) -> None:
+    """The flight recorder writes the surrounding pane snippet into the
+    `context` column at insert time."""
+    snippet = "$ ls\nfile1\nRun this command?\n→ Run (y)\n  Skip (esc or n)"
+    with connect(tmp_db) as conn:
+        rid = insert_pending(
+            conn, "ls", "tmux:s:0.0", kind="shell_command", context=snippet
+        )
+        row = get_row(conn, rid)
+    assert row is not None
+    assert row["context"] == snippet
+
+
+def test_get_row_returns_none_for_missing(tmp_db) -> None:
+    with connect(tmp_db) as conn:
+        assert get_row(conn, 999) is None
 
 
 def test_daily_counts_since_window_and_grouping(tmp_db) -> None:
