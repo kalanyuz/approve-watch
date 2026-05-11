@@ -158,36 +158,69 @@ async def _handle_pane(
                 kind=m.kind,
                 context=context,
             )
-            # Trip the alarm if this pane is firing too fast. The DB
-            # query already counts the row we just inserted, which is
-            # what we want — the rate snapshot is "as of this prompt".
-            rate = prompt_rate_per_minute(
-                conn, pane_source, window_minutes=RUNAWAY_WINDOW_MIN
-            )
-            if rate >= RUNAWAY_THRESHOLD_PER_MIN:
-                set_alarm(conn, pane_source, rate)
-                log.warning(
-                    "runaway-loop alarm: pane=%s rate=%.1f/min — "
-                    "auto-decision flips to reject until cleared",
-                    pane_source,
-                    rate,
+            # Alarm state for this row, decided up-front:
+            #   - already alarmed:  pre-claim a reject right here so the
+            #                       dashboard can't race ahead and
+            #                       auto-approve it; we also skip the
+            #                       rate recomputation so the displayed
+            #                       rate stays at the value that
+            #                       originally tripped the alarm rather
+            #                       than inflating with self-rejected
+            #                       rows.
+            #   - not alarmed yet:  compute the rate (counting the row
+            #                       we just inserted, "as of this
+            #                       prompt"); trip the alarm if it
+            #                       crosses the threshold, in which
+            #                       case we also pre-claim a reject for
+            #                       *this* row — it's already part of
+            #                       the loop.
+            already_alarmed = is_alarmed(conn, pane_source)
+            if already_alarmed:
+                pre_claimed = True
+            else:
+                rate = prompt_rate_per_minute(
+                    conn, pane_source, window_minutes=RUNAWAY_WINDOW_MIN
+                )
+                if rate >= RUNAWAY_THRESHOLD_PER_MIN:
+                    set_alarm(conn, pane_source, rate)
+                    log.warning(
+                        "runaway-loop alarm: pane=%s rate=%.1f/min — "
+                        "auto-rejecting subsequent prompts until cleared",
+                        pane_source,
+                        rate,
+                    )
+                    pre_claimed = True
+                else:
+                    pre_claimed = False
+            if pre_claimed:
+                claim_decision(
+                    conn, row_id, approved=0, decided_by="auto-watcher-alarmed"
                 )
 
-        def default_decision() -> tuple[int, str]:
-            # Re-check the alarm at timeout-time so a mid-await dismissal
-            # from the dashboard immediately resumes auto-approval.
-            with connect(db_path) as conn:
-                if is_alarmed(conn, pane_source):
-                    return 0, "auto-watcher-alarmed"
-            return 1, "auto-watcher"
+        if pre_claimed:
+            # Skip the await entirely — decision is locked in. The
+            # dashboard's _poll_pending won't even see this row as
+            # pending.
+            approved, decided_by = 0, "auto-watcher-alarmed"
+        else:
+            def default_decision() -> tuple[int, str]:
+                # Re-check the alarm at timeout-time so a mid-await
+                # dismissal from the dashboard immediately resumes
+                # auto-approval.
+                with connect(db_path) as conn:
+                    if is_alarmed(conn, pane_source):
+                        return 0, "auto-watcher-alarmed"
+                return 1, "auto-watcher"
 
-        timeout = (timeouts or KIND_TIMEOUTS_S).get(m.kind, KIND_TIMEOUTS_S[m.kind])
-        approved, decided_by = await _await_decision(
-            db_path,
-            row_id,
-            deadline=time.monotonic() + timeout,
-            default_decision_factory=default_decision,
-        )
+            timeout = (timeouts or KIND_TIMEOUTS_S).get(
+                m.kind, KIND_TIMEOUTS_S[m.kind]
+            )
+            approved, decided_by = await _await_decision(
+                db_path,
+                row_id,
+                deadline=time.monotonic() + timeout,
+                default_decision_factory=default_decision,
+            )
         log.info(
             "row %s decided: approved=%s by=%s -> sending keystroke",
             row_id,
