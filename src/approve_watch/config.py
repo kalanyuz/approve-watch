@@ -64,13 +64,16 @@ FAST_PATTERNS: list[str] = [
 ]
 
 # Tier 1: shell commands. Anchored on cursor-agent's "Run this command?" header
-# so we only fast-approve actual shell commands.
+# so we only fast-approve actual shell commands. The captured command can span
+# multiple lines (HEREDOCs, multi-line `$(…)` substitutions, etc.) — the
+# regex stops at either the `•` separator between allowlist clauses or at
+# the `→ Run` choice line, whichever comes first.
 SHELL_COMMAND_REGEX = (
     r"(?ms)"
     r"Run this command\?"
     r".*?Not\s+in\s+(?:team\s+)?allowlist:\s*"
-    r"(?P<command>[^\n•]+?)"
-    r"\s*(?:•|\n)"
+    r"(?P<command>.+?)"
+    r"\s*(?:•|\n\s*→)"
     r".*?Skip\s*\(esc or n\)"
 )
 
