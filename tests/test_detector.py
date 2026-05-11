@@ -44,6 +44,20 @@ PROMPT_SIMPLE = (
     "→ Run (once) (y)\n"
     "  Skip (esc or n)\n"
 )
+# Real user-reported case: a `gh pr edit` invocation with a HEREDOC
+# spanning several lines. The single-line-only regex used to fall back
+# to OTHER tier (1h timeout) and captured `)"` as the "command".
+PROMPT_HEREDOC = (
+    "Run this command?\n"
+    "Not in allowlist: gh pr edit 37985 --repo infra-k8s --body \"$(cat <<'EOF'\n"
+    "  ## What\n"
+    "\n"
+    "  Bump version suffix\n"
+    "  EOF\n"
+    "  )\"\n"
+    "→ Run (once) (y)\n"
+    "  Skip (esc or n)\n"
+)
 # Hypothetical "other" tier prompt — same hotkey footer, different verb.
 PROMPT_DELETE = (
     "Delete this file?\n"
@@ -114,6 +128,24 @@ def test_shell_pattern_matches_simple_form() -> None:
     assert m is not None
     assert m.kind == KIND_SHELL
     assert m.command == "ls -la"
+
+
+def test_shell_pattern_matches_multiline_heredoc_command() -> None:
+    """Regression: a multi-line command (HEREDOC, multi-line $(…) sub)
+    used to bypass the shell regex because [^\\n•]+? stops at the first
+    newline. The fallback OTHER regex then captured only the last line
+    (e.g. `)"`) and the row landed in the 1h `other` tier. Now the
+    command capture spans newlines up to either a `•` clause separator
+    or the `→ Run` choice line."""
+    m = make_detector().match(PROMPT_HEREDOC)
+    assert m is not None
+    assert m.kind == KIND_SHELL, (
+        f"HEREDOC command should auto-approve on the shell tier, got {m.kind}"
+    )
+    # The captured command spans the whole HEREDOC.
+    assert "gh pr edit 37985" in m.command
+    assert "EOF" in m.command
+    assert m.command.endswith(')"')
 
 
 def test_shell_pattern_handles_ansi_styled_prompt() -> None:
