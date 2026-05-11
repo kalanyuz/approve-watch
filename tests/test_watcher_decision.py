@@ -352,6 +352,75 @@ async def test_alarm_rate_not_inflated_by_subsequent_rejections(
     )
 
 
+async def test_clear_resets_rate_window_with_existing_real_approvals(
+    tmp_db: Path, monkeypatch
+) -> None:
+    """Regression for the cmux:workspace:1/surface:6 case: 50 real
+    auto-approved rows already in the 2-min window when the alarm
+    tripped. After P, the rate query must ignore those pre-dismissal
+    rows so the next prompt doesn't re-arm immediately."""
+    from approve_watch import config as cfg
+    from approve_watch.db import (
+        clear_alarm,
+        is_alarmed,
+        prompt_rate_per_minute,
+    )
+
+    monkeypatch.setattr(cfg, "RUNAWAY_THRESHOLD_PER_MIN", 10.0)
+    import approve_watch.watcher as w
+    monkeypatch.setattr(w, "RUNAWAY_THRESHOLD_PER_MIN", 10.0)
+
+    # 50 real auto-approved rows pile up in the rate window. This is
+    # the "user was working productively, then the agent went into a
+    # loop" scenario.
+    with connect(tmp_db) as conn:
+        for _ in range(50):
+            rid = conn.execute(
+                "INSERT INTO approvals (asked_at, command, source, kind) "
+                "VALUES (datetime('now'), 'work', 'tmux:s:0.0', 'shell_command')"
+            ).lastrowid
+            claim_decision(conn, rid, approved=1, decided_by="auto-watcher")
+
+        # Confirm: without dismissal, rate is well over threshold.
+        assert prompt_rate_per_minute(conn, "tmux:s:0.0", 2) == 25.0
+
+    # User presses P. (Don't bother actually tripping the alarm; we're
+    # testing the rate-reset semantics directly.)
+    with connect(tmp_db) as conn:
+        # Simulate: alarm is set then cleared.
+        from approve_watch.db import set_alarm
+        set_alarm(conn, "tmux:s:0.0", rate_per_min=25.0)
+        clear_alarm(conn, "tmux:s:0.0")
+        assert is_alarmed(conn, "tmux:s:0.0") is False
+
+    # Next prompt arrives. The rate query must skip the 50 older real
+    # approvals because they pre-date the dismissal.
+    src = FakeSource(["s:0.0"])
+    src._buffers["s:0.0"] = (
+        "Run this command?\n"
+        "Not in allowlist: ls -post-clear\n"
+        "→ Run (once) (y)\n"
+        "  Skip (esc or n)\n"
+    )
+    seen = _SignatureCache()
+    await _handle_pane(
+        src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
+
+    with connect(tmp_db) as conn:
+        assert is_alarmed(conn, "tmux:s:0.0") is False, (
+            "alarm re-armed despite dismissal — rate query is still "
+            "counting pre-dismissal rows"
+        )
+    post_row = next(
+        r for r in src.sent if r[0] == "s:0.0"
+    )
+    assert post_row == ("s:0.0", "y"), (
+        f"post-clear prompt should auto-approve, got {post_row}"
+    )
+
+
 async def test_clearing_alarm_does_not_immediately_retrigger(
     tmp_db: Path, monkeypatch
 ) -> None:

@@ -203,6 +203,50 @@ def test_prompt_rate_per_minute_counts_only_target_pane(tmp_db) -> None:
         assert prompt_rate_per_minute(conn, "tmux:nope:0.0", window_minutes=2) == 0.0
 
 
+def test_dismissal_resets_rate_window(tmp_db) -> None:
+    """Pressing `p` (clear_alarm) records a dismissal timestamp per
+    pane. The rate query then ignores any rows older than that
+    timestamp, giving the user a true 'restart from here' on a single
+    keypress even if there are many older real approvals piled up."""
+    from approve_watch.db import get_dismissal, set_alarm
+
+    with connect(tmp_db) as conn:
+        # 50 real (auto-approved) prompts pile up in the last 2 min.
+        for _ in range(50):
+            rid = insert_pending(conn, "ls", "tmux:s:0.0")
+            claim_decision(conn, rid, approved=1, decided_by="auto-watcher")
+
+        # Sanity: without dismissal, rate is high.
+        rate_pre = prompt_rate_per_minute(conn, "tmux:s:0.0", 2)
+        assert rate_pre == 25.0
+
+        # Trip + immediately dismiss (mirrors what the dashboard does).
+        set_alarm(conn, "tmux:s:0.0", rate_per_min=rate_pre)
+        cleared = clear_alarm(conn, "tmux:s:0.0")
+        assert cleared == 1
+        assert get_dismissal(conn, "tmux:s:0.0") is not None
+
+        # Now the rate query is cut off at the dismissal timestamp —
+        # none of the 50 pre-existing rows count. Rate is 0.
+        rate_post = prompt_rate_per_minute(conn, "tmux:s:0.0", 2)
+        assert rate_post == 0.0
+
+        # A fresh prompt after the dismissal does count.
+        insert_pending(conn, "fresh", "tmux:s:0.0")
+        rate_after_fresh = prompt_rate_per_minute(conn, "tmux:s:0.0", 2)
+        assert rate_after_fresh == 0.5  # 1 fresh row over a 2-min window
+
+
+def test_clear_alarm_without_existing_row_records_no_dismissal(tmp_db) -> None:
+    """Calling clear_alarm on a pane that wasn't actually alarmed is a
+    no-op — no dismissal row, no rate-window weirdness."""
+    from approve_watch.db import clear_alarm, get_dismissal
+
+    with connect(tmp_db) as conn:
+        assert clear_alarm(conn, "tmux:never-alarmed:0.0") == 0
+        assert get_dismissal(conn, "tmux:never-alarmed:0.0") is None
+
+
 def test_prompt_rate_excludes_auto_watcher_alarmed_rows(tmp_db) -> None:
     """Once an alarm trips, all its auto-rejected rows must drop out of
     the rate calculation — otherwise dismissing the alarm immediately
