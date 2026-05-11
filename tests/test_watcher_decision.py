@@ -243,9 +243,11 @@ async def test_signature_retired_after_prompt_clears(tmp_db: Path) -> None:
     assert m.signature not in seen
 
 
-async def test_alarmed_pane_auto_rejects_at_timeout(tmp_db: Path) -> None:
-    """When a pane is marked as alarmed, the watcher's timeout-default
-    flips from approve to reject so a runaway agent gets `n`'d back."""
+async def test_alarmed_pane_rejects_instantly_no_await(tmp_db: Path) -> None:
+    """When a pane is already alarmed, the watcher pre-claims a
+    rejection on the same connection as the insert — no await, no race
+    with the dashboard's 3.0s auto-approve. The handler must return
+    well under the shell-tier 0.5s FAST_TIMEOUT."""
     src = FakeSource(["s:0.0"])
     seen = _SignatureCache()
 
@@ -253,10 +255,15 @@ async def test_alarmed_pane_auto_rejects_at_timeout(tmp_db: Path) -> None:
     with connect(tmp_db) as conn:
         set_alarm(conn, "tmux:s:0.0", rate_per_min=20.0)
 
+    t0 = time.monotonic()
     await _handle_pane(
         src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
         post_decision_timeout=0.3,
     )
+    elapsed = time.monotonic() - t0
+    # No await on alarmed prompts → completes in <0.4s (just the
+    # post-decision wait), not 0.5s+ the shell-tier timeout.
+    assert elapsed < 0.45, f"alarmed prompt waited {elapsed:.2f}s; should be instant"
 
     assert src.sent == [("s:0.0", "n")], "alarmed pane should send n, not y"
     with connect(tmp_db) as conn:
@@ -264,6 +271,85 @@ async def test_alarmed_pane_auto_rejects_at_timeout(tmp_db: Path) -> None:
     assert len(rows) == 1
     assert rows[0]["approved"] == 0
     assert rows[0]["decided_by"] == "auto-watcher-alarmed"
+
+
+async def test_alarmed_pane_beats_dashboard_auto_approve_race(tmp_db: Path) -> None:
+    """Regression: previously the dashboard could claim approved=1
+    before the watcher's await-deadline fired, because the alarm check
+    ran only at timeout. Pre-claiming on insert closes that race."""
+    src = FakeSource(["s:0.0"])
+    seen = _SignatureCache()
+    with connect(tmp_db) as conn:
+        set_alarm(conn, "tmux:s:0.0", rate_per_min=20.0)
+
+    async def fake_dashboard_auto_approve() -> None:
+        # Mimic the dashboard's 3s auto-approve, but try IMMEDIATELY —
+        # if we win, the bug is back.
+        await asyncio.sleep(0.05)
+        with connect(tmp_db) as conn:
+            rid_row = conn.execute("SELECT id FROM approvals").fetchone()
+            if rid_row:
+                claim_decision(
+                    conn, rid_row[0], approved=1, decided_by="auto-dashboard"
+                )
+
+    await asyncio.gather(
+        _handle_pane(
+            src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+            post_decision_timeout=0.3,
+        ),
+        fake_dashboard_auto_approve(),
+    )
+
+    with connect(tmp_db) as conn:
+        rows = recent(conn)
+    assert rows[0]["approved"] == 0
+    assert rows[0]["decided_by"] == "auto-watcher-alarmed"
+    assert src.sent == [("s:0.0", "n")]
+
+
+async def test_alarm_rate_not_inflated_by_subsequent_rejections(
+    tmp_db: Path, monkeypatch
+) -> None:
+    """After an alarm trips, the watcher must NOT recompute and overwrite
+    the stored rate — otherwise rejected-by-alarm rows feed back into
+    the rate calculation and the dashboard banner inflates above the
+    real cursor-agent rate."""
+    from approve_watch import config as cfg
+    from approve_watch.db import list_alarms
+
+    monkeypatch.setattr(cfg, "RUNAWAY_THRESHOLD_PER_MIN", 1.0)
+    import approve_watch.watcher as w
+    monkeypatch.setattr(w, "RUNAWAY_THRESHOLD_PER_MIN", 1.0)
+
+    # Pre-arm with a known rate from the first trip.
+    with connect(tmp_db) as conn:
+        set_alarm(conn, "tmux:s:0.0", rate_per_min=4.0)
+
+    src = FakeSource(["s:0.0"])
+    seen = _SignatureCache()
+
+    # Run several prompts through; each should reject but NOT bump rate.
+    for sig_seed in ("a", "b", "c"):
+        # Vary the prompt so each has a fresh signature.
+        src._buffers["s:0.0"] = (
+            "Run this command?\n"
+            f"Not in allowlist: ls -{sig_seed}\n"
+            "→ Run (once) (y)\n"
+            "  Skip (esc or n)\n"
+        )
+        seen = _SignatureCache()  # forget previous sigs to admit each
+        await _handle_pane(
+            src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+            post_decision_timeout=0.3,
+        )
+
+    with connect(tmp_db) as conn:
+        alarms = list_alarms(conn)
+    assert len(alarms) == 1
+    assert alarms[0]["rate_per_min"] == 4.0, (
+        "stored rate must stay frozen at the trip value, not grow"
+    )
 
 
 async def test_runaway_loop_trips_alarm_inline(tmp_db: Path, monkeypatch) -> None:
@@ -295,8 +381,8 @@ async def test_runaway_loop_trips_alarm_inline(tmp_db: Path, monkeypatch) -> Non
 
     with connect(tmp_db) as conn:
         assert is_alarmed(conn, "tmux:s:0.0") is True
-    # And because the alarm was set during this very call, the default
-    # decision factory ran with alarmed=True → n was sent.
+    # And because the alarm was set inline, the watcher pre-claimed a
+    # rejection on the same connection → n was sent without waiting.
     assert src.sent == [("s:0.0", "n")]
 
 
