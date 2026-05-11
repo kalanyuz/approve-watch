@@ -52,6 +52,17 @@ DANGEROUS_PATTERNS: list[str] = [
     r"\bdocker\s+system\s+prune\s+(?:-a\s+)?--volumes",
 ]
 
+# Fast-tier promotion (post-classification): if a prompt's *block* (header
+# + body, m.group(0)) matches any of these patterns, demote `other` → the
+# 3.2s fast tier. cursor-agent's "Write to this file?" is the canonical
+# example — users mostly want it auto-approved like a shell command rather
+# than waiting an hour. The dangerous-pattern check still runs first, so
+# `Write to ~/.ssh/id_rsa` would stay dangerous even though it's a Write
+# prompt. Override via [fast_patterns] in config.toml to add more.
+FAST_PATTERNS: list[str] = [
+    r"\bWrite to this file\??",
+]
+
 # Tier 1: shell commands. Anchored on cursor-agent's "Run this command?" header
 # so we only fast-approve actual shell commands.
 SHELL_COMMAND_REGEX = (
@@ -144,6 +155,9 @@ class Config:
     dangerous_patterns: list[str] = field(
         default_factory=lambda: list(DANGEROUS_PATTERNS)
     )
+    fast_patterns: list[str] = field(
+        default_factory=lambda: list(FAST_PATTERNS)
+    )
 
 
 def load_config() -> Config:
@@ -157,6 +171,7 @@ def load_config() -> Config:
     dash = dict(KIND_DASHBOARD_TIMEOUTS_S)
     dash.update({k: float(v) for k, v in (data.get("dashboard_timeouts") or {}).items()})
     user_dangerous = data.get("dangerous_patterns")
+    user_fast = data.get("fast_patterns")
     return Config(
         shell_regex=data.get("shell_regex", data.get("prompt_regex", SHELL_COMMAND_REGEX)),
         other_regex=data.get("other_regex", OTHER_PROMPT_REGEX),
@@ -166,5 +181,8 @@ def load_config() -> Config:
         dangerous_patterns=(
             list(user_dangerous) if user_dangerous is not None
             else list(DANGEROUS_PATTERNS)
+        ),
+        fast_patterns=(
+            list(user_fast) if user_fast is not None else list(FAST_PATTERNS)
         ),
     )

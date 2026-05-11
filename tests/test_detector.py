@@ -4,6 +4,7 @@ import pytest
 
 from approve_watch.config import (
     DANGEROUS_PATTERNS,
+    FAST_PATTERNS,
     KIND_DANGEROUS,
     KIND_OTHER,
     KIND_SHELL,
@@ -13,11 +14,14 @@ from approve_watch.config import (
 from approve_watch.detector import Detector, strip_ansi
 
 
-def make_detector(*, with_dangerous: bool = True) -> Detector:
+def make_detector(
+    *, with_dangerous: bool = True, with_fast: bool = True
+) -> Detector:
     return Detector(
         SHELL_COMMAND_REGEX,
         OTHER_PROMPT_REGEX,
         DANGEROUS_PATTERNS if with_dangerous else None,
+        FAST_PATTERNS if with_fast else None,
     )
 
 
@@ -275,3 +279,53 @@ def test_dangerous_pattern_list_can_be_disabled() -> None:
     m = d.match(_shell_prompt("rm -rf /"))
     assert m is not None
     assert m.kind == KIND_SHELL  # not promoted to dangerous
+
+
+PROMPT_WRITE = (
+    "Write to this file?\n"
+    "src/main.py\n"
+    "→ Write (y)\n"
+    "  Skip (esc or n)\n"
+)
+
+
+def test_write_prompt_is_demoted_to_fast_tier() -> None:
+    """cursor-agent's "Write to this file?" prompt should auto-approve
+    on the 3.2s shell-tier timer, not the 1h other-tier default. The
+    fast-pattern check runs against the matched block (which contains
+    the question header) so the file-path command alone needn't match."""
+    m = make_detector().match(PROMPT_WRITE)
+    assert m is not None
+    assert m.kind == KIND_SHELL
+    assert m.command == "src/main.py"
+
+
+def test_fast_pattern_does_not_override_dangerous() -> None:
+    """A Write prompt against a credential file must stay dangerous,
+    not be demoted to the fast tier."""
+    prompt = (
+        "Write to this file?\n"
+        "~/.ssh/id_rsa\n"
+        "→ Write (y)\n"
+        "  Skip (esc or n)\n"
+    )
+    m = make_detector().match(prompt)
+    assert m is not None
+    assert m.kind == KIND_DANGEROUS
+
+
+def test_fast_pattern_list_can_be_disabled() -> None:
+    """Without fast_patterns, Write prompts stay on the other tier."""
+    d = make_detector(with_fast=False)
+    m = d.match(PROMPT_WRITE)
+    assert m is not None
+    assert m.kind == KIND_OTHER
+
+
+def test_fast_pattern_doesnt_affect_shell_tier_matches() -> None:
+    """A shell-command prompt that happens to mention 'Write to this
+    file?' in its body would still be a shell command (not demoted from
+    a tier it never was on). Sanity check: shell tier passes through."""
+    m = make_detector().match(_shell_prompt("ls -la"))
+    assert m is not None
+    assert m.kind == KIND_SHELL
