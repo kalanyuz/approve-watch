@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS pane_alarms (
   alarmed_at    TEXT NOT NULL,
   rate_per_min  REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS pane_dismissals (
+  pane          TEXT PRIMARY KEY,
+  dismissed_at  TEXT NOT NULL
+);
 """
 
 
@@ -208,24 +213,31 @@ def prompt_rate_per_minute(
     conn: sqlite3.Connection, pane: str, window_minutes: int
 ) -> float:
     """Average prompts-per-minute on ``pane`` over the last
-    ``window_minutes``, *excluding* rows the watcher already
-    auto-rejected as part of an alarmed-loop response. That exclusion is
-    what lets the user press `p` to dismiss the alarm and get a clean
-    restart — otherwise the rate query would still count the dozens of
-    self-rejected rows that the alarm itself produced and instantly
-    re-trip.
+    ``window_minutes``, with two exclusions:
 
-    The signal we actually care about is "how often is cursor-agent
-    presenting *new* prompts", and `auto-watcher-alarmed` rows are
-    consequences of the alarm, not independent signal."""
+      1. Rows the watcher already auto-rejected as part of an
+         alarmed-loop response — they're consequences of the alarm,
+         not independent signal.
+      2. Rows older than the pane's most recent dismissal (`p` in the
+         dashboard, recorded in pane_dismissals). Pressing `p` is the
+         user saying "ignore everything that's piled up so far; only
+         re-arm on genuinely new signal from this point forward".
+
+    Together those two filters give a single press of `p` a clean
+    restart: the alarm won't re-trip until a fresh burst of *real*
+    prompts post-dismissal exceeds the threshold."""
     row = conn.execute(
         f"""
         SELECT COUNT(*) AS n FROM approvals
         WHERE source = ?
           AND asked_at >= datetime('now', '-{int(window_minutes)} minutes')
+          AND asked_at > COALESCE(
+                (SELECT dismissed_at FROM pane_dismissals WHERE pane = ?),
+                '0000-01-01'
+              )
           AND COALESCE(decided_by, '') != 'auto-watcher-alarmed'
         """,
-        (pane,),
+        (pane, pane),
     ).fetchone()
     return float(row["n"]) / max(window_minutes, 1)
 
@@ -243,12 +255,45 @@ def set_alarm(conn: sqlite3.Connection, pane: str, rate_per_min: float) -> None:
     )
 
 
+def set_dismissal(conn: sqlite3.Connection, pane: str) -> None:
+    """Mark ``pane`` as dismissed at the current instant. Future rate
+    queries will ignore any rows older than this timestamp on this
+    pane, so a single press of `p` actually gives the user a clean
+    restart even when there are many pre-existing real prompts in the
+    rate window."""
+    conn.execute(
+        """
+        INSERT INTO pane_dismissals (pane, dismissed_at) VALUES (?, ?)
+        ON CONFLICT(pane) DO UPDATE SET dismissed_at = excluded.dismissed_at
+        """,
+        (pane, now_iso()),
+    )
+
+
+def get_dismissal(conn: sqlite3.Connection, pane: str) -> str | None:
+    row = conn.execute(
+        "SELECT dismissed_at FROM pane_dismissals WHERE pane = ?", (pane,)
+    ).fetchone()
+    return row["dismissed_at"] if row else None
+
+
 def clear_alarm(conn: sqlite3.Connection, pane: str | None = None) -> int:
     """Clear one alarm, or all alarms if ``pane`` is None. Returns the
-    number of rows removed."""
+    number of rows removed.
+
+    Also records a dismissal timestamp on each cleared pane (see
+    ``set_dismissal``) so the rate query treats this as a hard reset
+    rather than re-arming on stale rows."""
     if pane is None:
-        return conn.execute("DELETE FROM pane_alarms").rowcount
-    return conn.execute("DELETE FROM pane_alarms WHERE pane = ?", (pane,)).rowcount
+        panes = [r["pane"] for r in conn.execute("SELECT pane FROM pane_alarms")]
+        n = conn.execute("DELETE FROM pane_alarms").rowcount
+        for p in panes:
+            set_dismissal(conn, p)
+        return n
+    n = conn.execute("DELETE FROM pane_alarms WHERE pane = ?", (pane,)).rowcount
+    if n > 0:
+        set_dismissal(conn, pane)
+    return n
 
 
 def is_alarmed(conn: sqlite3.Connection, pane: str) -> bool:
