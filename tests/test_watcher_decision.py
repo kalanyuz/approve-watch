@@ -326,3 +326,96 @@ async def test_flight_recorder_captures_context(tmp_db: Path) -> None:
     assert ctx is not None
     assert "Run this command?" in ctx, "matched block missing from context"
     assert "git diff --cached" in ctx, "pre-context missing"
+
+
+def _shell_prompt(cmd: str) -> str:
+    return (
+        f"Run this command?\n"
+        f"Not in allowlist: {cmd}\n"
+        f"→ Run (once) (y)\n"
+        f"  Skip (esc or n)\n"
+    )
+
+
+class QueueSource(FakeSource):
+    """FakeSource that simulates a queue of distinct cursor-agent prompts.
+    Each y/n keystroke advances to the next buffer in the list (or to a
+    cleared state when the queue is empty)."""
+
+    def __init__(self, pane: PaneId, queue: list[str]) -> None:
+        super().__init__([pane])
+        self._pane = pane
+        self._queue = list(queue)
+        self._buffers[pane] = self._queue[0] if self._queue else CLEARED_TEXT
+
+    def _advance(self, pane: PaneId) -> None:
+        # Pop the head, advance to the next prompt, or clear when done.
+        if self._queue:
+            self._queue.pop(0)
+        self._buffers[pane] = self._queue[0] if self._queue else CLEARED_TEXT
+
+    def send_approve(self, pane: PaneId) -> None:
+        self.sent.append((pane, "y"))
+        self._advance(pane)
+
+    def send_reject(self, pane: PaneId) -> None:
+        self.sent.append((pane, "n"))
+        self._advance(pane)
+
+
+async def test_drains_consecutive_prompts_in_one_call(tmp_db: Path) -> None:
+    """When cursor-agent shows a queue of approval prompts back-to-back
+    on the same pane, the watcher must answer all of them inside one
+    _handle_pane call rather than returning after the first and waiting
+    for the next watch_loop poll (which dropped prompts in practice)."""
+    queue = [
+        _shell_prompt("git log --oneline -3"),
+        _shell_prompt("git status --short --branch"),
+        _shell_prompt("git diff --cached"),
+    ]
+    src = QueueSource("s:0.0", queue)
+    seen = _SignatureCache()
+
+    await _handle_pane(
+        src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
+
+    # Three keystrokes (one per queued prompt), three rows inserted, all
+    # auto-approved by the watcher.
+    assert src.sent == [("s:0.0", "y"), ("s:0.0", "y"), ("s:0.0", "y")]
+    with connect(tmp_db) as conn:
+        rows = recent(conn)
+    assert len(rows) == 3
+    commands = sorted(r["command"] for r in rows)
+    assert commands == [
+        "git diff --cached",
+        "git log --oneline -3",
+        "git status --short --branch",
+    ]
+    for r in rows:
+        assert r["decided_by"] == "auto-watcher"
+        assert r["approved"] == 1
+
+
+async def test_drain_stops_at_first_unhandled_prompt(tmp_db: Path) -> None:
+    """If the same-signature prompt is still showing after the
+    post-decision window (slow repaint / dropped keystroke), the drain
+    bails out cleanly without spinning."""
+
+    class StuckQueueSource(FakeSource):
+        def send_approve(self, pane: PaneId) -> None:
+            self.sent.append((pane, "y"))
+            # Buffer never changes — simulates cursor-agent never
+            # repainting after our keystroke.
+
+    src = StuckQueueSource(["s:0.0"])  # initial buffer is SHELL_PROMPT
+    seen = _SignatureCache()
+    await _handle_pane(
+        src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
+    assert src.sent == [("s:0.0", "y")]  # exactly one
+    with connect(tmp_db) as conn:
+        rows = recent(conn)
+    assert len(rows) == 1

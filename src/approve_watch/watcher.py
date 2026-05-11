@@ -38,6 +38,14 @@ CONTEXT_LINES_BEFORE = 12
 CONTEXT_LINES_AFTER = 4
 CONTEXT_MAX_BYTES = 8192
 
+# Multi-prompt drain: cursor-agent can show a queue of approval prompts
+# back-to-back. After we answer one, the buffer often transitions directly
+# to the next prompt (different command, different signature). Rather than
+# return and wait for watch_loop's next poll (which can miss fast
+# transitions), the post-decision loop notices the new prompt inline and
+# we drain up to this many in a single _handle_pane call.
+MAX_DRAIN_PER_PANE = 16
+
 
 def _capture_context(raw: str, matched_block: str) -> str:
     """Return the matched prompt block plus a few surrounding lines from
@@ -119,86 +127,118 @@ async def _handle_pane(
     timeouts: dict[str, float] | None = None,
     post_decision_timeout: float = 5.0,
 ) -> None:
-    raw = await asyncio.to_thread(source.capture, pane)
-    if not raw:
-        return
-    m = detector.match(raw)
-    if m is None or m.signature in seen:
-        return
-
-    seen.add(m.signature)
-    log.info("pane %s prompt detected (%s): %s", pane, m.kind, m.command)
+    """Handle one or more prompts on ``pane``. Loops up to
+    MAX_DRAIN_PER_PANE times so a queue of back-to-back prompts (e.g.
+    cursor-agent batching three git commands) gets answered inside a
+    single task rather than waiting for the next watch_loop poll between
+    each — that gap dropped prompts on fast transitions in practice."""
 
     pane_source = f"{source.name}:{pane}"
-    context = _capture_context(strip_ansi(raw), m.block)
-    with connect(db_path) as conn:
-        row_id = insert_pending(
-            conn,
-            command=m.command,
-            source=pane_source,
-            kind=m.kind,
-            context=context,
-        )
-        # Trip the alarm if this pane is firing too fast. The DB query
-        # already counts the row we just inserted, which is what we want
-        # — the rate snapshot is "as of this prompt".
-        rate = prompt_rate_per_minute(
-            conn, pane_source, window_minutes=RUNAWAY_WINDOW_MIN
-        )
-        if rate >= RUNAWAY_THRESHOLD_PER_MIN:
-            set_alarm(conn, pane_source, rate)
-            log.warning(
-                "runaway-loop alarm: pane=%s rate=%.1f/min — auto-decision "
-                "flips to reject until cleared",
-                pane_source,
-                rate,
-            )
 
-    def default_decision() -> tuple[int, str]:
-        # Re-check the alarm at timeout-time so a mid-await dismissal
-        # from the dashboard immediately resumes auto-approval.
-        with connect(db_path) as conn:
-            if is_alarmed(conn, pane_source):
-                return 0, "auto-watcher-alarmed"
-        return 1, "auto-watcher"
-
-    timeout = (timeouts or KIND_TIMEOUTS_S).get(m.kind, KIND_TIMEOUTS_S[m.kind])
-    approved, decided_by = await _await_decision(
-        db_path,
-        row_id,
-        deadline=time.monotonic() + timeout,
-        default_decision_factory=default_decision,
-    )
-    log.info(
-        "row %s decided: approved=%s by=%s -> sending keystroke",
-        row_id,
-        approved,
-        decided_by,
-    )
-    if approved == 1:
-        await asyncio.to_thread(source.send_approve, pane)
-    else:
-        await asyncio.to_thread(source.send_reject, pane)
-
-    # Only retire the signature once we observe the prompt is gone (or
-    # replaced by a different-sig prompt). If the buffer still shows the
-    # same prompt when this window closes — slow repaint, dropped
-    # keystroke, etc. — keep the signature in `seen` so the next poll
-    # cycle can't insert a second row and send a second keystroke. The
-    # LRU bound (256 entries) is the only thing that retires it then.
-    deadline = time.monotonic() + post_decision_timeout
-    while time.monotonic() < deadline:
-        await asyncio.sleep(0.1)
-        post = await asyncio.to_thread(source.capture, pane)
-        nxt = detector.match(post)
-        if nxt is None or nxt.signature != m.signature:
-            seen.discard(m.signature)
+    for _drain in range(MAX_DRAIN_PER_PANE):
+        raw = await asyncio.to_thread(source.capture, pane)
+        if not raw:
             return
+        m = detector.match(raw)
+        if m is None or m.signature in seen:
+            return
+
+        seen.add(m.signature)
+        log.info(
+            "pane %s prompt detected (%s, drain=%d): %s",
+            pane, m.kind, _drain, m.command,
+        )
+
+        context = _capture_context(strip_ansi(raw), m.block)
+        with connect(db_path) as conn:
+            row_id = insert_pending(
+                conn,
+                command=m.command,
+                source=pane_source,
+                kind=m.kind,
+                context=context,
+            )
+            # Trip the alarm if this pane is firing too fast. The DB
+            # query already counts the row we just inserted, which is
+            # what we want — the rate snapshot is "as of this prompt".
+            rate = prompt_rate_per_minute(
+                conn, pane_source, window_minutes=RUNAWAY_WINDOW_MIN
+            )
+            if rate >= RUNAWAY_THRESHOLD_PER_MIN:
+                set_alarm(conn, pane_source, rate)
+                log.warning(
+                    "runaway-loop alarm: pane=%s rate=%.1f/min — "
+                    "auto-decision flips to reject until cleared",
+                    pane_source,
+                    rate,
+                )
+
+        def default_decision() -> tuple[int, str]:
+            # Re-check the alarm at timeout-time so a mid-await dismissal
+            # from the dashboard immediately resumes auto-approval.
+            with connect(db_path) as conn:
+                if is_alarmed(conn, pane_source):
+                    return 0, "auto-watcher-alarmed"
+            return 1, "auto-watcher"
+
+        timeout = (timeouts or KIND_TIMEOUTS_S).get(m.kind, KIND_TIMEOUTS_S[m.kind])
+        approved, decided_by = await _await_decision(
+            db_path,
+            row_id,
+            deadline=time.monotonic() + timeout,
+            default_decision_factory=default_decision,
+        )
+        log.info(
+            "row %s decided: approved=%s by=%s -> sending keystroke",
+            row_id,
+            approved,
+            decided_by,
+        )
+        if approved == 1:
+            await asyncio.to_thread(source.send_approve, pane)
+        else:
+            await asyncio.to_thread(source.send_reject, pane)
+
+        # Watch the buffer for one of three outcomes:
+        #   - cleared:   no prompt visible            → done, return
+        #   - replaced:  new prompt with a different
+        #                signature                    → drain it inline
+        #   - stale:     same prompt still visible
+        #                after the window             → keep sig in
+        #                                              seen, return
+        deadline = time.monotonic() + post_decision_timeout
+        state = "stale"
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+            post = await asyncio.to_thread(source.capture, pane)
+            nxt = detector.match(post)
+            if nxt is None:
+                state = "cleared"
+                break
+            if nxt.signature != m.signature:
+                state = "replaced"
+                break
+
+        if state == "stale":
+            log.warning(
+                "pane %s: prompt did not clear after keystroke; keeping "
+                "sig %s in seen-cache to avoid double-approve",
+                pane,
+                m.signature,
+            )
+            return
+
+        # Either cleared or replaced — the old sig is safe to retire.
+        seen.discard(m.signature)
+        if state == "cleared":
+            return
+        # state == "replaced": loop back and handle the new prompt.
+
     log.warning(
-        "pane %s: prompt did not clear after keystroke; keeping sig %s in"
-        " seen-cache to avoid double-approve",
+        "pane %s: drained %d prompts in one handler; further prompts will "
+        "be picked up on the next watch_loop poll",
         pane,
-        m.signature,
+        MAX_DRAIN_PER_PANE,
     )
 
 
