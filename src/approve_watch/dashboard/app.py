@@ -172,8 +172,10 @@ class ApproveWatchApp(App[None]):
 
     def on_approval_card_resolved(self, message: ApprovalCard.Resolved) -> None:
         self._known_pending.discard(message.row_id)
-        # A resolved card means the recent-approvals tab is stale.
+        # A resolved card means the recent-approvals tab is stale and
+        # today's cumulative point should tick up immediately.
         self._refresh_recent()
+        self._refresh_charts()
 
     def action_show_tab(self, tab_id: str) -> None:
         self.query_one("#charts-tabs", TabbedContent).active = tab_id

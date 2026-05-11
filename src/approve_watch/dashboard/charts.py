@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from textual_plotext import PlotextPlot
 
 from approve_watch.db import (
     connect,
+    daily_counts_since,
     hourly_counts_7d,
-    minute_counts_60m,
     total_before,
 )
 
 HOURS = 7 * 24      # one week of hourly buckets (left chart)
-MINUTES = 60        # rolling cumulative window (right chart)
+DAYS = 7            # daily cumulative chart window (right chart)
 
 
 def _hourly_series_7d(
@@ -39,36 +39,32 @@ def _hourly_series_7d(
     return x, y, day_ticks
 
 
-def _evenly_spaced(n: int, max_ticks: int = 6) -> list[int]:
-    """Indices in [0, n-1] approximately evenly spaced. Used to pick a
-    handful of X-axis tick positions on the rolling cumulative chart."""
-    if n <= max_ticks:
-        return list(range(n))
-    step = (n - 1) / (max_ticks - 1)
-    return [round(i * step) for i in range(max_ticks)]
+def _cumulative_series_7d(
+    counts_by_day: dict[str, int],
+    baseline: int,
+    today: date | None = None,
+) -> tuple[list[int], list[int], list[str]]:
+    """Build the cumulative line for the last 7 days. ``baseline`` is the
+    all-time total before the window starts; the series cumsums per-day
+    counts onto that baseline so the Y-axis tracks the all-time running
+    total (it never resets to zero). ``counts_by_day`` keys are
+    ``YYYY-MM-DD`` strings (UTC, matching daily_counts_since).
+    ``today`` defaults to the current UTC date."""
+    if today is None:
+        today = datetime.now(timezone.utc).date()
+    window_start = today - timedelta(days=DAYS - 1)
 
-
-def _minute_series_60m(
-    points: list[tuple[str, int]],
-) -> tuple[list[int], list[int], list[datetime]]:
-    """Densify ``points`` (sparse minute buckets) into a contiguous 60-min
-    series ending at the current minute. Returns (x_indices, per-minute
-    counts, per-minute timestamps). The returned series always has length
-    ``MINUTES``, even when the DB has fewer rows — keeps the X-axis
-    width fixed so the chart visibly slides as time passes."""
-    counts: dict[str, int] = {b: n for b, n in points}
-    now = datetime.now().replace(second=0, microsecond=0)
     x: list[int] = []
-    y: list[int] = []
-    stamps: list[datetime] = []
-    for i in range(MINUTES - 1, -1, -1):
-        t = now - timedelta(minutes=i)
-        bucket = t.strftime("%Y-%m-%d %H:%M")
-        idx = MINUTES - 1 - i
-        x.append(idx)
-        y.append(counts.get(bucket, 0))
-        stamps.append(t)
-    return x, y, stamps
+    cum: list[int] = []
+    labels: list[str] = []
+    running = baseline
+    for i in range(DAYS):
+        d = window_start + timedelta(days=i)
+        running += counts_by_day.get(d.isoformat(), 0)
+        x.append(i)
+        cum.append(running)
+        labels.append(d.strftime("%a %d"))  # "Mon 09"
+    return x, cum, labels
 
 
 class TimelineChart(PlotextPlot):
@@ -94,39 +90,33 @@ class TimelineChart(PlotextPlot):
 
 
 class CumulativeChart(PlotextPlot):
-    """All-time cumulative approvals, viewed through a sliding 60-minute
-    window. The Y-axis is the running total of every approval ever
-    recorded (so the line never resets); the X-axis only shows the most
-    recent 60 minutes and slides forward each minute. Tick labels are
-    full ``HH:MM`` timestamps at evenly-spaced minute marks."""
+    """All-time cumulative approvals, viewed through a 7-day daily
+    window. Y is the running total of every approval ever recorded — the
+    line never drops to zero — and X shows the last 7 days at daily
+    granularity. Today's point grows visibly as new approvals come in
+    (the dashboard pokes refresh_data on every resolution)."""
 
     DEFAULT_CSS = "CumulativeChart { height: 100%; }"
 
     def refresh_data(self) -> None:
+        today = datetime.now(timezone.utc).date()
+        window_start = today - timedelta(days=DAYS - 1)
+        cutoff_iso = (
+            datetime.combine(window_start, datetime.min.time(), tzinfo=timezone.utc)
+            .isoformat(timespec="microseconds")
+        )
+
         with connect() as conn:
-            points = minute_counts_60m(conn)
-            # asked_at is stored as UTC ISO (see db.now_iso), so the
-            # cutoff has to be UTC too.
-            cutoff_dt = datetime.now(timezone.utc).replace(
-                second=0, microsecond=0
-            ) - timedelta(minutes=MINUTES)
-            baseline = total_before(conn, cutoff_dt.isoformat(timespec="microseconds"))
-        x, per_minute, stamps = _minute_series_60m(points)
+            counts_by_day = dict(daily_counts_since(conn, DAYS))
+            baseline = total_before(conn, cutoff_iso)
 
-        running = baseline
-        cum: list[int] = []
-        for n in per_minute:
-            running += n
-            cum.append(running)
-
-        tick_idx = _evenly_spaced(len(stamps))
-        tick_lbl = [stamps[i].strftime("%H:%M") for i in tick_idx]
+        x, cum, labels = _cumulative_series_7d(counts_by_day, baseline, today=today)
 
         plt = self.plt
         plt.clear_figure()
         plt.theme("pro")
         plt.plot(x, cum, marker="braille")
-        plt.xticks(tick_idx, tick_lbl)
-        plt.title("Cumulative approvals (all time, last 60 min view)")
+        plt.xticks(x, labels)
+        plt.title("Cumulative approvals (all time, last 7d)")
         plt.ylabel("total")
         self.refresh()
