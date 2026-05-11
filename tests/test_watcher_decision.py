@@ -352,6 +352,85 @@ async def test_alarm_rate_not_inflated_by_subsequent_rejections(
     )
 
 
+async def test_clearing_alarm_does_not_immediately_retrigger(
+    tmp_db: Path, monkeypatch
+) -> None:
+    """Regression for: user presses `p` to clear the alarm; next prompt
+    comes in; alarm pops up again instantly at the old inflated rate.
+
+    Sequence:
+      1. Pre-arm alarm on the pane.
+      2. Five prompts flow through → all pre-claimed as rejected
+         (decided_by='auto-watcher-alarmed').
+      3. clear_alarm — equivalent to the user pressing `p`.
+      4. One more prompt — should NOT re-trip because the five
+         alarm-rejected rows are excluded from the rate calc.
+      5. The sixth row must be auto-approved normally.
+    """
+    from approve_watch import config as cfg
+    from approve_watch.db import clear_alarm, is_alarmed
+
+    monkeypatch.setattr(cfg, "RUNAWAY_THRESHOLD_PER_MIN", 1.0)
+    import approve_watch.watcher as w
+    monkeypatch.setattr(w, "RUNAWAY_THRESHOLD_PER_MIN", 1.0)
+
+    # Step 1: pre-arm.
+    with connect(tmp_db) as conn:
+        set_alarm(conn, "tmux:s:0.0", rate_per_min=12.5)
+
+    src = FakeSource(["s:0.0"])
+    seen = _SignatureCache()
+
+    # Step 2: five prompts → all alarm-rejected.
+    for sig_seed in "abcde":
+        src._buffers["s:0.0"] = (
+            "Run this command?\n"
+            f"Not in allowlist: ls -{sig_seed}\n"
+            "→ Run (once) (y)\n"
+            "  Skip (esc or n)\n"
+        )
+        seen = _SignatureCache()
+        await _handle_pane(
+            src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+            post_decision_timeout=0.3,
+        )
+
+    # Step 3: user presses `p`.
+    with connect(tmp_db) as conn:
+        n_cleared = clear_alarm(conn, "tmux:s:0.0")
+        assert n_cleared == 1
+        assert is_alarmed(conn, "tmux:s:0.0") is False
+
+    # Step 4: another prompt arrives. The rate calc must skip the five
+    # auto-watcher-alarmed rows, see no qualifying prompts, and decline
+    # to re-trip the alarm.
+    src._buffers["s:0.0"] = (
+        "Run this command?\n"
+        "Not in allowlist: ls -post-clear\n"
+        "→ Run (once) (y)\n"
+        "  Skip (esc or n)\n"
+    )
+    seen = _SignatureCache()
+    await _handle_pane(
+        src, "s:0.0", make_detector(), seen, tmp_db, FAST_TIMEOUTS,
+        post_decision_timeout=0.3,
+    )
+
+    with connect(tmp_db) as conn:
+        assert is_alarmed(conn, "tmux:s:0.0") is False, (
+            "alarm re-tripped immediately after clear — the rate query "
+            "is still counting alarm-rejected rows"
+        )
+
+    # Step 5: the post-clear prompt was auto-approved, not rejected.
+    with connect(tmp_db) as conn:
+        rows = recent(conn, limit=10)
+    post_clear = [r for r in rows if r["command"] == "ls -post-clear"]
+    assert len(post_clear) == 1
+    assert post_clear[0]["decided_by"] == "auto-watcher"
+    assert post_clear[0]["approved"] == 1
+
+
 async def test_runaway_loop_trips_alarm_inline(tmp_db: Path, monkeypatch) -> None:
     """A burst of prompts on the same pane within the runaway window must
     set an alarm row so subsequent prompts auto-reject."""

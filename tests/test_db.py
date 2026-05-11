@@ -203,6 +203,29 @@ def test_prompt_rate_per_minute_counts_only_target_pane(tmp_db) -> None:
         assert prompt_rate_per_minute(conn, "tmux:nope:0.0", window_minutes=2) == 0.0
 
 
+def test_prompt_rate_excludes_auto_watcher_alarmed_rows(tmp_db) -> None:
+    """Once an alarm trips, all its auto-rejected rows must drop out of
+    the rate calculation — otherwise dismissing the alarm immediately
+    re-trips it on the next prompt (the self-rejected rows are still
+    within the 2-minute window)."""
+    with connect(tmp_db) as conn:
+        # 4 normal pending rows.
+        for _ in range(4):
+            insert_pending(conn, "cmd", "tmux:s:0.0")
+        # 30 alarm-rejected rows — simulating the noise produced by a
+        # previously-tripped alarm.
+        for _ in range(30):
+            rid = insert_pending(conn, "cmd", "tmux:s:0.0")
+            claim_decision(conn, rid, approved=0, decided_by="auto-watcher-alarmed")
+
+        # Total rows in window: 34. Without the filter, rate = 17/min.
+        # With the filter, only the 4 non-alarmed rows count → 2/min.
+        rate = prompt_rate_per_minute(conn, "tmux:s:0.0", window_minutes=2)
+        assert rate == 2.0, (
+            f"rate should exclude auto-watcher-alarmed rows; got {rate}"
+        )
+
+
 def test_insert_pending_stores_context(tmp_db) -> None:
     """The flight recorder writes the surrounding pane snippet into the
     `context` column at insert time."""
