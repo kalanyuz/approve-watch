@@ -207,14 +207,23 @@ def last_approved(conn: sqlite3.Connection) -> sqlite3.Row | None:
 def prompt_rate_per_minute(
     conn: sqlite3.Connection, pane: str, window_minutes: int
 ) -> float:
-    """Average prompts-per-minute on ``pane`` over the last ``window_minutes``.
-    Used by the runaway-loop alarm: a rate sustained above some threshold
-    is the signal that an agent is stuck retrying the same gate."""
+    """Average prompts-per-minute on ``pane`` over the last
+    ``window_minutes``, *excluding* rows the watcher already
+    auto-rejected as part of an alarmed-loop response. That exclusion is
+    what lets the user press `p` to dismiss the alarm and get a clean
+    restart — otherwise the rate query would still count the dozens of
+    self-rejected rows that the alarm itself produced and instantly
+    re-trip.
+
+    The signal we actually care about is "how often is cursor-agent
+    presenting *new* prompts", and `auto-watcher-alarmed` rows are
+    consequences of the alarm, not independent signal."""
     row = conn.execute(
         f"""
         SELECT COUNT(*) AS n FROM approvals
         WHERE source = ?
           AND asked_at >= datetime('now', '-{int(window_minutes)} minutes')
+          AND COALESCE(decided_by, '') != 'auto-watcher-alarmed'
         """,
         (pane,),
     ).fetchone()
