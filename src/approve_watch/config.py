@@ -115,8 +115,11 @@ DECISION_POLL_S = 0.1
 # RUNAWAY_THRESHOLD_PER_MIN averaged across the last RUNAWAY_WINDOW_MIN
 # minutes, the watcher flips to auto-rejecting on that pane until the
 # user dismisses the alarm. Catches "agent stuck in a retry loop"
-# situations early, before they spend significant compute.
-RUNAWAY_THRESHOLD_PER_MIN = 10.0
+# situations early, before they spend significant compute. The default
+# of 20/min reflects real-world cursor-agent usage — productive runs
+# (multi-step git/build/test workflows) routinely cross 10/min, so a
+# stricter threshold tripped on legit activity.
+RUNAWAY_THRESHOLD_PER_MIN = 20.0
 RUNAWAY_WINDOW_MIN = 2
 
 # Backwards-compat aliases used by older test code.
