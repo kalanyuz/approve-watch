@@ -319,6 +319,23 @@ PROMPT_WRITE = (
     "→ Write (y)\n"
     "  Skip (esc or n)\n"
 )
+# Real user-reported case: cursor-agent renders `gh api` prompts with an
+# unusual " : " (space-padded colon) and ends up in OTHER if the SHELL
+# regex is strict about colon spacing.
+PROMPT_GH_API_SPACED_COLON = (
+    "Run this command?\n"
+    "Not in allowlist : gh api repos/owner/repo/pulls/123\n"
+    "→ Run (once) (y)\n"
+    "  Skip (esc or n)\n"
+)
+# OTHER-tier prompt that mentions `gh api` in the captured block —
+# should be demoted to fast tier via FAST_PATTERNS.
+PROMPT_GH_API_OTHER_TIER = (
+    "Allow this gh command?\n"
+    "team allowlist : gh api repos/owner/repo/pulls/123\n"
+    "→ Allow (y)\n"
+    "  Skip (esc or n)\n"
+)
 
 
 def test_write_prompt_is_demoted_to_fast_tier() -> None:
@@ -361,3 +378,24 @@ def test_fast_pattern_doesnt_affect_shell_tier_matches() -> None:
     m = make_detector().match(_shell_prompt("ls -la"))
     assert m is not None
     assert m.kind == KIND_SHELL
+
+
+def test_shell_pattern_tolerates_spaced_colon_in_allowlist() -> None:
+    """Regression: cursor-agent renders `gh api …` prompts with a
+    space-padded colon (`Not in allowlist : …`) and the strict regex
+    used to fall back to OTHER tier. Should land in SHELL with the
+    full command captured."""
+    m = make_detector().match(PROMPT_GH_API_SPACED_COLON)
+    assert m is not None
+    assert m.kind == KIND_SHELL
+    assert m.command == "gh api repos/owner/repo/pulls/123"
+
+
+def test_gh_api_other_tier_is_demoted_to_fast() -> None:
+    """When the prompt header isn't 'Run this command?' (e.g.
+    'Allow this gh command?'), SHELL doesn't match and OTHER catches
+    it — but FAST_PATTERNS containing `\\bgh\\s+api\\b` demotes it to
+    the 3.2s fast tier."""
+    m = make_detector().match(PROMPT_GH_API_OTHER_TIER)
+    assert m is not None
+    assert m.kind == KIND_SHELL  # demoted from OTHER via fast-pattern

@@ -61,17 +61,21 @@ DANGEROUS_PATTERNS: list[str] = [
 # prompt. Override via [fast_patterns] in config.toml to add more.
 FAST_PATTERNS: list[str] = [
     r"\bWrite to this file\??",
+    # `gh api …` calls (read-mostly; user opted in to fast-tracking).
+    r"\bgh\s+api\b",
 ]
 
 # Tier 1: shell commands. Anchored on cursor-agent's "Run this command?" header
 # so we only fast-approve actual shell commands. The captured command can span
 # multiple lines (HEREDOCs, multi-line `$(…)` substitutions, etc.) — the
 # regex stops at either the `•` separator between allowlist clauses or at
-# the `→ Run` choice line, whichever comes first.
+# the `→ Run` choice line, whichever comes first. The `\s*` around the
+# colon in `allowlist:` tolerates the `team allowlist : …` spacing variant
+# cursor-agent occasionally renders for `gh` commands.
 SHELL_COMMAND_REGEX = (
     r"(?ms)"
     r"Run this command\?"
-    r".*?Not\s+in\s+(?:team\s+)?allowlist:\s*"
+    r".*?Not\s+in\s+(?:team\s+)?allowlist\s*:\s*"
     r"(?P<command>.+?)"
     r"\s*(?:•|\n\s*→)"
     r".*?Skip\s*\(esc or n\)"
