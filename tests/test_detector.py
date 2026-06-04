@@ -44,6 +44,22 @@ PROMPT_SIMPLE = (
     "→ Run (once) (y)\n"
     "  Skip (esc or n)\n"
 )
+# cursor-agent's sandbox-escape prompt with the standard allowlist body.
+PROMPT_SANDBOX_WITH_ALLOWLIST = (
+    "Run this command outside the sandbox?\n"
+    "Not in allowlist: npm test\n"
+    "→ Run (once) (y)\n"
+    "  Skip (esc or n)\n"
+)
+# Same prompt but with a bare body (no "Not in allowlist:" line) — the
+# SHELL regex won't match, OTHER catches it, and the FAST_PATTERN for
+# the sandbox header demotes it to the 3.2s tier.
+PROMPT_SANDBOX_BARE = (
+    "Run this command outside the sandbox?\n"
+    "npm test\n"
+    "→ Run (y)\n"
+    "  Skip (esc or n)\n"
+)
 # Real user-reported case: a `gh pr edit` invocation with a HEREDOC
 # spanning several lines. The single-line-only regex used to fall back
 # to OTHER tier (1h timeout) and captured `)"` as the "command".
@@ -146,6 +162,38 @@ def test_shell_pattern_matches_multiline_heredoc_command() -> None:
     assert "gh pr edit 37985" in m.command
     assert "EOF" in m.command
     assert m.command.endswith(')"')
+
+
+def test_shell_pattern_matches_sandbox_escape_with_allowlist() -> None:
+    """'Run this command outside the sandbox?' with the standard
+    allowlist body lands on the fast shell tier and auto-approves."""
+    m = make_detector().match(PROMPT_SANDBOX_WITH_ALLOWLIST)
+    assert m is not None
+    assert m.kind == KIND_SHELL
+    assert m.command == "npm test"
+
+
+def test_sandbox_escape_bare_body_demoted_to_fast() -> None:
+    """Sandbox prompt without a 'Not in allowlist:' body: SHELL doesn't
+    match, OTHER catches it, and the FAST_PATTERN for the sandbox header
+    demotes it from the 1h tier to the 3.2s fast tier."""
+    m = make_detector().match(PROMPT_SANDBOX_BARE)
+    assert m is not None
+    assert m.kind == KIND_SHELL  # demoted from OTHER via fast-pattern
+
+
+def test_sandbox_escape_still_dangerous_if_destructive() -> None:
+    """The dangerous check runs before the sandbox fast-path, so a
+    destructive command outside the sandbox stays manual-only."""
+    prompt = (
+        "Run this command outside the sandbox?\n"
+        "Not in allowlist: sudo rm -rf /etc\n"
+        "→ Run (once) (y)\n"
+        "  Skip (esc or n)\n"
+    )
+    m = make_detector().match(prompt)
+    assert m is not None
+    assert m.kind == KIND_DANGEROUS
 
 
 def test_shell_pattern_handles_ansi_styled_prompt() -> None:

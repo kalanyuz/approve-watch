@@ -71,14 +71,20 @@ DANGEROUS_PATTERNS: list[str] = [
 # prompt. Override via [fast_patterns] in config.toml to add more.
 FAST_PATTERNS: list[str] = [
     r"\bWrite to this file\??",
+    # cursor-agent's sandbox-escape prompt — user opted to auto-approve.
+    # Acts as a fallback when this prompt's body doesn't fit the SHELL
+    # regex's "Not in allowlist:" shape (the SHELL header itself also
+    # accepts the "outside the sandbox" variant below).
+    r"Run this command outside the sandbox\??",
     # The whole `gh` CLI (user opted in). Destructive subcommands
     # (gh repo delete, gh secret set, …) are caught by DANGEROUS_PATTERNS
     # above, which is checked first and overrides this demotion.
     r"\bgh\s+[a-z]",
 ]
 
-# Tier 1: shell commands. Anchored on cursor-agent's "Run this command?" header
-# so we only fast-approve actual shell commands. The captured command can span
+# Tier 1: shell commands. Anchored on cursor-agent's "Run this command?"
+# header (and the "Run this command outside the sandbox?" variant) so we
+# only fast-approve actual shell commands. The captured command can span
 # multiple lines (HEREDOCs, multi-line `$(…)` substitutions, etc.) — the
 # regex stops at either the `•` separator between allowlist clauses or at
 # the `→ Run` choice line, whichever comes first. The `\s*` around the
@@ -86,7 +92,7 @@ FAST_PATTERNS: list[str] = [
 # cursor-agent occasionally renders for `gh` commands.
 SHELL_COMMAND_REGEX = (
     r"(?ms)"
-    r"Run this command\?"
+    r"Run this command(?:\s+outside the sandbox)?\?"
     r".*?Not\s+in\s+(?:team\s+)?allowlist\s*:\s*"
     r"(?P<command>.+?)"
     r"\s*(?:•|\n\s*→)"
@@ -132,10 +138,11 @@ DECISION_POLL_S = 0.1
 # minutes, the watcher flips to auto-rejecting on that pane until the
 # user dismisses the alarm. Catches "agent stuck in a retry loop"
 # situations early, before they spend significant compute. The default
-# of 20/min reflects real-world cursor-agent usage — productive runs
-# (multi-step git/build/test workflows) routinely cross 10/min, so a
-# stricter threshold tripped on legit activity.
-RUNAWAY_THRESHOLD_PER_MIN = 20.0
+# of 100/min is deliberately permissive — real productive cursor-agent
+# runs (multi-step git/build/test workflows, batched approvals) burst
+# well past lower thresholds, so the alarm now only fires on genuine
+# pathological loops.
+RUNAWAY_THRESHOLD_PER_MIN = 100.0
 RUNAWAY_WINDOW_MIN = 2
 
 # Backwards-compat aliases used by older test code.
