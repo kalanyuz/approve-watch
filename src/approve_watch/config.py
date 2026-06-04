@@ -50,6 +50,16 @@ DANGEROUS_PATTERNS: list[str] = [
     # Container / k8s destructive ops.
     r"\bkubectl\s+delete\s+(?:--all|namespace|ns)\b",
     r"\bdocker\s+system\s+prune\s+(?:-a\s+)?--volumes",
+    # Destructive `gh` CLI subcommands. The whole `gh` tool is on the
+    # fast tier (see FAST_PATTERNS), so these explicit dangerous
+    # patterns are what keep the irreversible ones off it — dangerous
+    # is checked first and wins.
+    r"\bgh\s+repo\s+delete\b",
+    r"\bgh\s+release\s+delete\b",
+    r"\bgh\s+secret\s+(?:set|delete)\b",
+    r"\bgh\s+ssh-key\s+delete\b",
+    r"\bgh\s+gpg-key\s+delete\b",
+    r"\bgh\s+auth\s+(?:logout|refresh|token)\b",
 ]
 
 # Fast-tier promotion (post-classification): if a prompt's *block* (header
@@ -61,8 +71,10 @@ DANGEROUS_PATTERNS: list[str] = [
 # prompt. Override via [fast_patterns] in config.toml to add more.
 FAST_PATTERNS: list[str] = [
     r"\bWrite to this file\??",
-    # `gh api …` calls (read-mostly; user opted in to fast-tracking).
-    r"\bgh\s+api\b",
+    # The whole `gh` CLI (user opted in). Destructive subcommands
+    # (gh repo delete, gh secret set, …) are caught by DANGEROUS_PATTERNS
+    # above, which is checked first and overrides this demotion.
+    r"\bgh\s+[a-z]",
 ]
 
 # Tier 1: shell commands. Anchored on cursor-agent's "Run this command?" header
