@@ -126,6 +126,19 @@ class ApprovalCard(Vertical):
     def _tick(self) -> None:
         if self._resolved:
             return
+        # Poll for external decisions: the user may have approved/rejected
+        # directly in the tmux pane (typing y/esc), the watcher may have
+        # pre-claimed an alarm rejection, or another dashboard instance
+        # may have resolved this row. Without this poll, manually-handled
+        # rows in long-timeout tiers (especially `dangerous`, 24h) would
+        # sit on the queue until their full timeout elapsed.
+        with connect() as conn:
+            existing_approved, existing_by = fetch_decision(conn, self.row_id)
+        if existing_approved is not None:
+            self._decide(
+                approved=existing_approved, by=existing_by or "external"
+            )
+            return
         self.elapsed = round(self.elapsed + TICK_S, 2)
         self._bar.update(progress=min(self.elapsed, self._timeout))
         if self.elapsed >= self._timeout:

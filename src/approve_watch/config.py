@@ -50,6 +50,16 @@ DANGEROUS_PATTERNS: list[str] = [
     # Container / k8s destructive ops.
     r"\bkubectl\s+delete\s+(?:--all|namespace|ns)\b",
     r"\bdocker\s+system\s+prune\s+(?:-a\s+)?--volumes",
+    # Destructive `gh` CLI subcommands. The whole `gh` tool is on the
+    # fast tier (see FAST_PATTERNS), so these explicit dangerous
+    # patterns are what keep the irreversible ones off it — dangerous
+    # is checked first and wins.
+    r"\bgh\s+repo\s+delete\b",
+    r"\bgh\s+release\s+delete\b",
+    r"\bgh\s+secret\s+(?:set|delete)\b",
+    r"\bgh\s+ssh-key\s+delete\b",
+    r"\bgh\s+gpg-key\s+delete\b",
+    r"\bgh\s+auth\s+(?:logout|refresh|token)\b",
 ]
 
 # Fast-tier promotion (post-classification): if a prompt's *block* (header
@@ -66,6 +76,10 @@ FAST_PATTERNS: list[str] = [
     # regex's "Not in allowlist:" shape (the SHELL header itself also
     # accepts the "outside the sandbox" variant below).
     r"Run this command outside the sandbox\??",
+    # The whole `gh` CLI (user opted in). Destructive subcommands
+    # (gh repo delete, gh secret set, …) are caught by DANGEROUS_PATTERNS
+    # above, which is checked first and overrides this demotion.
+    r"\bgh\s+[a-z]",
 ]
 
 # Tier 1: shell commands. Anchored on cursor-agent's "Run this command?"
@@ -73,11 +87,13 @@ FAST_PATTERNS: list[str] = [
 # only fast-approve actual shell commands. The captured command can span
 # multiple lines (HEREDOCs, multi-line `$(…)` substitutions, etc.) — the
 # regex stops at either the `•` separator between allowlist clauses or at
-# the `→ Run` choice line, whichever comes first.
+# the `→ Run` choice line, whichever comes first. The `\s*` around the
+# colon in `allowlist:` tolerates the `team allowlist : …` spacing variant
+# cursor-agent occasionally renders for `gh` commands.
 SHELL_COMMAND_REGEX = (
     r"(?ms)"
     r"Run this command(?:\s+outside the sandbox)?\?"
-    r".*?Not\s+in\s+(?:team\s+)?allowlist:\s*"
+    r".*?Not\s+in\s+(?:team\s+)?allowlist\s*:\s*"
     r"(?P<command>.+?)"
     r"\s*(?:•|\n\s*→)"
     r".*?Skip\s*\(esc or n\)"
